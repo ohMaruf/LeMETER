@@ -1,0 +1,4 @@
+python3 -m pip install -r requirements.txt
+
+
+python3 -m pip install "git+https://github.com/galilai-group/lejepa.git"
