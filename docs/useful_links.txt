@@ -1,0 +1,6 @@
+
+Speedup Models:
+https://github.com/Lightning-AI/pytorch-lightning
+
+Benchmarking:
+https://docs.pytorch.org/tutorials/recipes/recipes/benchmark.html
