@@ -8,3 +8,7 @@ def download_datasets():
     )
 
     print("nyu-depth-v2 downloaded to:", path)
+
+
+if __name__ == '__main__':
+    raise SystemExit(download_datasets())

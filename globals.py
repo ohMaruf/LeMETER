@@ -1,3 +1,5 @@
+import torch
+
 NYU_IMAGE_RESOLUTION = (480, 640)  # height, width (rows x columns notation)
 INPUT_RESOLUTION = (192, 256)  # height, width (rows x columns notation)
 
@@ -14,3 +16,13 @@ augmentation_parameters = {
 }
 
 dts_type = "nyu-depth-v2"
+
+FLOATING_PRECISION = torch.float32
+NUM_SLICES = 256
+PROJ_DIM = 128
+EMBEDDING_DIM = 160
+BATCH_SIZE = 64
+LEARNING_RATE = 1e-3
+NUM_EPOCHS = 10
+LAMBDA = 5e-2
+VIEWS = 8

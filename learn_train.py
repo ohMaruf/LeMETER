@@ -1,31 +1,27 @@
 import time
-from pathlib import Path
-
+import matplotlib
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+
+from cli import parse_cli_args
+from hardware_acceleration import enable_hardware_acceleration, print_device_memory_snapshot  # noqa: E501
 from datasets import load_dataset
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-
+from pathlib import Path
 from model import Conv2dBNAct, DerfTransformer
 
+matplotlib.use('Agg')
+
 EPOCHS = 20
-BATCH_SIZE = 64
+BATCH_SIZE = 128  # Double batch size to feed the hungry GPU architecture
 LR = 3e-4
 WEIGHT_DECAY = 1e-4
 IMAGE_SIZE = 64
 NUM_WORKERS = 4
 OUTPUT_DIR = Path("runs/simple_net")
-RESUME = True
 
-
-def get_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
 
 class SimpleNet(nn.Module):
     def __init__(self, num_classes=10):
@@ -70,7 +66,11 @@ class HFCifarDataset(Dataset):
 
 
 def build_loaders():
-    normalize = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616))
+    normalize = transforms.Normalize(
+        (0.4914, 0.4822, 0.4465),
+        (0.2470, 0.2435, 0.2616)
+    )
+
     train_tf = transforms.Compose([
         transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
         transforms.RandomHorizontalFlip(),
@@ -88,23 +88,47 @@ def build_loaders():
     train = HFCifarDataset(ds["train"], train_tf)
     test = HFCifarDataset(ds["test"], eval_tf)
 
-    pin = torch.cuda.is_available()
-    train_loader = DataLoader(train, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=pin)
-    eval_loader = DataLoader(test, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=pin)
+    # 2. OPTIMIZATION: Maximize pipeline speed between CPU RAM and VRAM
+    train_loader = DataLoader(
+        train,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+        pin_memory=True,
+        persistent_workers=True
+    )
+    eval_loader = DataLoader(
+        test,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=True,
+        persistent_workers=True
+    )
     return train_loader, eval_loader
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device):
+def train_one_epoch(model, loader, criterion, optimizer, scaler, device):
     model.train()
     total_loss = total_correct = total = 0
-    for images, targets in loader:
+    for idx, (images, targets) in enumerate(loader):
         images = images.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
-        logits = model(images)
-        loss = criterion(logits, targets)
-        loss.backward()
-        optimizer.step()
+
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            logits = model(images)
+            loss = criterion(logits, targets)
+
+        # Scaler prevents underflow errors from the float16 gradients
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        if idx == 0 or idx == len(loader) - 1:
+            step_label = "First Batch" if idx == 0 else "End of Epoch"
+            print_device_memory_snapshot(device, step_label)
+
         bs = targets.size(0)
         total_loss += loss.item() * bs
         total_correct += (logits.argmax(1) == targets).sum().item()
@@ -119,8 +143,11 @@ def evaluate(model, loader, criterion, device):
     for images, targets in loader:
         images = images.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
-        logits = model(images)
-        loss = criterion(logits, targets)
+
+        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            logits = model(images)
+            loss = criterion(logits, targets)
+
         bs = targets.size(0)
         total_loss += loss.item() * bs
         total_correct += (logits.argmax(1) == targets).sum().item()
@@ -147,22 +174,31 @@ def plot_history(history, output_dir):
 
 
 def main():
-    device = get_device()
+    cli_args = parse_cli_args()
+    device = enable_hardware_acceleration(cli_args.config)
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"Using device: {device}")
 
     train_loader, eval_loader = build_loaders()
 
     model = SimpleNet(num_classes=10).to(device)
+
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=LR,
+        weight_decay=WEIGHT_DECAY
+    )
+
+    # Gradient scaler required to manage our Mixed Precision calculations
+    scaler = torch.amp.GradScaler("cuda")
 
     history = {"train": [], "eval": []}
     best_acc = 0.0
     start_epoch = 1
 
     ckpt_path = OUTPUT_DIR / "last_checkpoint.pt"
-    if RESUME and ckpt_path.exists():
+    if cli_args.resume and ckpt_path.exists():
         ckpt = torch.load(ckpt_path, map_location=device)
         model.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optimizer_state"])
@@ -173,17 +209,34 @@ def main():
 
     for epoch in range(start_epoch, EPOCHS + 1):
         t0 = time.time()
-        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss, train_acc = train_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            scaler,
+            device
+        )
+
         eval_loss, eval_acc = evaluate(model, eval_loader, criterion, device)
         elapsed = time.time() - t0
 
-        history["train"].append({"epoch": epoch, "loss": train_loss, "accuracy": train_acc})
-        history["eval"].append({"epoch": epoch, "loss": eval_loss, "accuracy": eval_acc})
+        history["train"].append({
+            "epoch": epoch,
+            "loss": train_loss,
+            "accuracy": train_acc
+        })
+
+        history["eval"].append({
+            "epoch": epoch,
+            "loss": eval_loss,
+            "accuracy": eval_acc
+        })
 
         print(
             f"[{epoch:03d}/{EPOCHS:03d}] "
             f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
-            f"eval_loss={eval_loss:.4f} eval_acc={eval_acc:.4f} time={elapsed:.1f}s"
+            f"eval_loss={eval_loss:.4f} eval_acc={eval_acc:.4f} time={elapsed:.1f}s"  # noqa: E501
         )
 
         plot_history(history, OUTPUT_DIR)
@@ -207,4 +260,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
