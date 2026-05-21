@@ -6,7 +6,7 @@ import globals
 
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from torch.utils.data import DataLoader
-from dataset import build_dataset
+from dataset import build_augmented_dataset
 from meter import MeterEncoder
 from torch.amp import GradScaler, autocast
 from hardware_acceleration import Config, enable_hardware_acceleration
@@ -71,7 +71,7 @@ def main():
     DEVICE = enable_hardware_acceleration(Config.RX9060XT)
 
     encoder = MeterEncoder(DEVICE, "xxs").to(DEVICE)
-    train_ds = build_dataset("train", globals.VIEWS)
+    train_ds = build_augmented_dataset("train", globals.VIEWS)
     train = DataLoader(
         train_ds,
         batch_size=globals.BATCH_SIZE,

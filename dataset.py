@@ -29,7 +29,7 @@ class PreprocessedDepthDataset(Dataset):
         self,
         root_dir: str | Path,
         manifest_path: str | Path,
-        depth_divisor: float = 1.0
+        depth_divisor: float = 1.0,
     ) -> None:
         super().__init__()
         self.root_dir = Path(root_dir)
@@ -41,7 +41,9 @@ class PreprocessedDepthDataset(Dataset):
         if not self.root_dir.exists():
             raise FileNotFoundError(f"Dataset root does not exist: {self.root_dir}")  # noqa: E501
         if not self.manifest_path.exists():
-            raise FileNotFoundError(f"Dataset manifest does not exist: {self.manifest_path}")  # noqa: E501
+            raise FileNotFoundError(
+                f"Dataset manifest does not exist: {self.manifest_path}"
+            )  # noqa: E501
 
         samples: list[dict[str, Path]] = []
         with self.manifest_path.open(newline="", encoding="utf-8") as handle:
@@ -60,14 +62,20 @@ class PreprocessedDepthDataset(Dataset):
                 depth_path = self.root_dir / depth_rel_path
 
                 if not image_path.exists():
-                    raise FileNotFoundError(f"Missing RGB image referenced by manifest: {image_path}")  # noqa: E501
+                    raise FileNotFoundError(
+                        f"Missing RGB image referenced by manifest: {image_path}"
+                    )  # noqa: E501
                 if not depth_path.exists():
-                    raise FileNotFoundError(f"Missing depth map referenced by manifest: {depth_path}")  # noqa: E501
+                    raise FileNotFoundError(
+                        f"Missing depth map referenced by manifest: {depth_path}"
+                    )  # noqa: E501
 
-                samples.append({
-                    "image_path": image_path,
-                    "depth_path": depth_path,
-                })
+                samples.append(
+                    {
+                        "image_path": image_path,
+                        "depth_path": depth_path,
+                    }
+                )
 
         if not samples:
             raise ValueError(f"Manifest is empty: {self.manifest_path}")
@@ -86,7 +94,7 @@ class PreprocessedDepthDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> dict[str, Tensor | str]:
+    def __getitem__(self, idx: int) -> dict[str, Tensor]:
         sample = self.samples[idx]
         image = self._load_image_tensor(sample["image_path"])
         depth = self._load_depth_tensor(sample["depth_path"])
@@ -103,7 +111,7 @@ class AugmentedDepthDataset(PreprocessedDepthDataset):
         root_dir: str | Path,
         manifest_path: str | Path,
         depth_divisor: float = 1.0,
-        views=1
+        views=1,
     ) -> None:
         super().__init__(root_dir, manifest_path, depth_divisor)
 
@@ -114,7 +122,7 @@ class AugmentedDepthDataset(PreprocessedDepthDataset):
                 v2.RandomApply([v2.ColorJitter(0.8, 0.8, 0.8, 0.2)], p=0.8),
                 v2.RandomGrayscale(p=0.2),
                 v2.RandomApply([v2.GaussianBlur(kernel_size=7, sigma=(0.1, 2.0))]),  # noqa: E501
-                v2.RandomApply([v2.RandomSolarize(threshold=.5)], p=0.2),
+                v2.RandomApply([v2.RandomSolarize(threshold=0.5)], p=0.2),
                 v2.RandomHorizontalFlip(),
                 v2.ToImage(),
                 v2.ToDtype(FLOATING_PRECISION, scale=True),
@@ -134,12 +142,30 @@ class AugmentedDepthDataset(PreprocessedDepthDataset):
 
     def __getitem__(self, idx):
         item = super().__getitem__(idx)
-        image = item['image']
+        image = item["image"]
         transform = self.augmentation if self.views > 1 else self.test
-        return torch.stack([transform(image) for _ in range(self.views)]), item['depth']  # noqa: E501
+        return torch.stack([transform(image) for _ in range(self.views)]), item["depth"]  # noqa: E501
 
 
-def build_dataset(split: str, views: int) -> AugmentedDepthDataset:
+def build_dataset(split: str, views: int = 1) -> PreprocessedDepthDataset:
+    spec = DATASET_SPECS[NYU_DEPTH_V2]
+    if split == "train":
+        manifest_key = "train_manifest"
+    elif split == "test":
+        manifest_key = "test_manifest"
+    else:
+        raise ValueError(f"Unsupported split: {split}")
+
+    root_dir = Path(spec["root"])
+    manifest_path = root_dir / Path(spec[manifest_key])
+    return PreprocessedDepthDataset(
+        root_dir=root_dir,
+        manifest_path=manifest_path,
+        depth_divisor=float(spec.get("depth_divisor", 1.0)),
+    )
+
+
+def build_augmented_dataset(split: str, views: int = 1) -> AugmentedDepthDataset:
     spec = DATASET_SPECS[NYU_DEPTH_V2]
     if split == "train":
         manifest_key = "train_manifest"
