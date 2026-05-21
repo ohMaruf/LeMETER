@@ -51,22 +51,26 @@ def eval_model(
 
     test_dataset = DataLoader(dataset)
     for item in tqdm.tqdm(test_dataset, total=len(test_dataset)):
+        x, y = item["image"].to(device), item["depth"].to(device)
+
         with torch.amp.autocast("cuda", dtype=torch.float16):
-            x, y = item["image"].to(device), item["depth"].to(device)
             z = model(x)
 
-            y = TF.interpolate(
-                y,
-                scale_factor=0.25,
-                mode="bilinear",
-                align_corners=False,
-            ).to(device)
+        z = z.float()
+        z = TF.interpolate(
+            z,
+            size=(y.shape[2], y.shape[3]),
+            mode="bilinear",
+            align_corners=False,
+        )
 
-            total_delta1 += delta1(y, z)
-            total_rel += rel(y, z)
-            total_rmse += rmse(y, z)
+        y = y.float()
 
-    logger.info(f"RMSE = {total_rmse / len(test_dataset):.3f}")
+        total_delta1 += delta1(y, z)
+        total_rel += rel(y, z)
+        total_rmse += rmse(y, z)
+
+    logger.info(f"RMSE = {total_rmse / (100 * len(test_dataset)):.3f}")
     logger.info(f"REL = {total_rel / len(test_dataset):.3f}")
     logger.info(f"δ1 = {total_delta1 / len(test_dataset):.3f}")
 
