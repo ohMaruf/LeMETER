@@ -55,10 +55,15 @@ class SigReg(nn.Module):
 
         # phi(t) = exp(-t^2 / 2)
         # phi_hat(t) := empirical characteristic function
-        # phi_hat(t) = 1/B + sum_{b=1}^{n} exp( i * t * uj ), given a random direction aj
-        # | phi(t) - phi(t) |^2 =
-        #   = [(Re(phi_hat(t)) - phi(t)) + i Im(t)] * [(Re(phi_hat(t)) - phi(t)) - i Im(t)]
-        #   =  (Re(phi_hat(t)) - phi(t))^2 + Im^2
+        # phi_hat(t) = 1/B * sum_{b=1}^{B} exp( i * t * uj ), given a random direction aj
+        # with Euler complex exponential formula: exp( i * x ) = cos(x) + i sin(x)
+        # phi_hat(t) = 1/B * sum_{b=1}^{B} cos( t * uj ) + i * 1/B * sum_{b=1}^{B} sin( t * uj ),
+        # let phi_hat(t) = Re + i Im
+
+        # | phi_hat(t) - phi(t) |^2 =
+        # with |z| := z * z* (z* is z conjugated)
+        #   = [(Re - phi(t)) + i Im] * [(Re) - phi(t)) - i Im(t)]
+        #   =  (Re) - phi(t))^2 + Im^2
         # B = batch size which in our case is idx -3 since x_t has shape [C, B, H, W]
         phi_hat_re = x_t.cos().mean(-3)
         phi_hat_im = x_t.sin().mean(-3)
