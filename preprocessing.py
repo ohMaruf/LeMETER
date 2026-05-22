@@ -170,6 +170,13 @@ def write_nyu_completion_marker() -> Path:
     return NYU_COMPLETE_MARKER
 
 
+def copy_nyu_manifest(csv_path: Path) -> None:
+    copy_with_parents(
+        csv_path,
+        NYU_PREPROCESSED_ROOT / csv_path.relative_to(NYU_DATASET_ROOT),
+    )
+
+
 def preprocess_split(
     rows: list[ManifestRow],
     *,
@@ -205,6 +212,9 @@ def preprocess_nyu_depth_v2() -> None:
         logger.info(f"Skipping {NYU_DATASET_NAME}: completion marker exists at {NYU_COMPLETE_MARKER}")
         logger.info(f"Preprocessing of {NYU_DATASET_NAME} is complete")
         return
+
+    copy_nyu_manifest(NYU_TRAIN_CSV)
+    copy_nyu_manifest(NYU_TEST_CSV)
 
     train_rows = load_manifest_rows(NYU_TRAIN_CSV)
     test_rows = load_manifest_rows(NYU_TEST_CSV)
