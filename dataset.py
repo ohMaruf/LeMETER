@@ -12,8 +12,6 @@ from torch import Tensor
 
 import pandas as pd
 
-NYU_DEPTH_V2 = "nyu-depth-v2"
-
 class NormalizedNyuDataset(Dataset):
     root = Path("preprocessed_datasets/nyu-depth-v2")
     train_manifest_rel = Path("data/nyu2_train.csv")
@@ -25,7 +23,6 @@ class NormalizedNyuDataset(Dataset):
         split: Literal["train", "test"],
     ) -> None:
         super().__init__()
-        self.depth_divisor = 10.0
         self.samples = self._load_split(split)
         self.zscore_normalize = v2.Normalize(*self._load_normalization_stats())
 
@@ -73,9 +70,10 @@ class NormalizedNyuDataset(Dataset):
     def _normalize_image(self, image: Tensor) -> Tensor:
         return self.zscore_normalize(image / 255.0)
 
-    def _load_depth_tensor(self, depth_path: Path) -> Tensor:
+    @staticmethod
+    def _load_depth_tensor(depth_path: Path) -> Tensor:
         with Image.open(depth_path) as depth:
-            depth_tensor = TF.pil_to_tensor(depth).float() / self.depth_divisor
+            depth_tensor = TF.pil_to_tensor(depth).float()
             return depth_tensor
 
     def __len__(self) -> int:
@@ -128,16 +126,3 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"]))
         transform = self.augmentation if self.views > 1 else self.test
         return torch.stack([transform(image) for _ in range(self.views)]), depth  # noqa: E501
-
-
-def build_dataset(split: Literal["train", "test"]) -> NormalizedNyuDataset:
-    return NormalizedNyuDataset(
-        split=split,
-    )
-
-
-def build_augmented_dataset(split: Literal["train", "test"], views: int = 1) -> AugmentedNyuDataset:
-    return AugmentedNyuDataset(
-        split=split,
-        views=views,
-    )

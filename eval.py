@@ -7,7 +7,6 @@ import globals
 from tqdm import tqdm
 from hardware_acceleration import enable_hardware_acceleration, Config
 from meter import Meter
-from dataset import build_dataset
 from torch.utils.data import DataLoader
 from torch import Tensor
 from dataset import NormalizedNyuDataset
@@ -64,8 +63,9 @@ def eval_model(
     for item in tqdm(test_dataset, total=len(test_dataset)):
         x, y = item["image"].to(device), item["depth"].to(device)
 
+        # model produces depth in centimeters, but label is in millimeters
         z = model(x)
-        z = z.float()
+        z = z.float() * 10  # convert centimeters to millimeters
         z = TF.interpolate(
             z,
             size=globals.NYU_IMAGE_RESOLUTION,
@@ -84,7 +84,8 @@ def eval_model(
     if valid_items == 0:
         raise ValueError("Evaluation dataset did not contain any valid depth pixels.")
 
-    logger.info(f"RMSE = {total_rmse / (100 * valid_items):.3f}")
+    # factor 1000, because we want RMSE in meters, not millimeters
+    logger.info(f"RMSE = {total_rmse / (1000 * valid_items):.3f}")
     logger.info(f"REL = {total_rel / valid_items:.3f}")
     logger.info(f"δ1 = {total_delta1 / valid_items:.3f}")
 
@@ -95,7 +96,7 @@ def main():
     state_dict = torch.load("meter-models/build_model_best_nyu_xxs", map_location=device)
     model.load_state_dict(state_dict)
 
-    dataset = build_dataset("test")
+    dataset = NormalizedNyuDataset("test")
     eval_model(model, dataset, device)
 
 
