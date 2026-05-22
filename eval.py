@@ -1,3 +1,5 @@
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as TF
@@ -10,6 +12,7 @@ from meter import Meter
 from torch.utils.data import DataLoader
 from torch import Tensor
 from dataset import NormalizedNyuDataset
+
 
 def valid_depth_mask(y: Tensor, z: Tensor) -> Tensor:
     return (y > 0) & torch.isfinite(y) & torch.isfinite(z)
@@ -45,12 +48,41 @@ def rmse(y: Tensor, z: Tensor, mask: Tensor = None) -> float:
     return ((y - z).square().mean()).sqrt().item()
 
 
+def synchronize_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
+
+
+def load_model(device: torch.device) -> nn.Module:
+    model = Meter(device, "xxs")
+    state_dict = torch.load("meter-models/build_model_best_nyu_xxs", map_location=device)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    return model
+
+
 @torch.no_grad()
-def eval_model(
+def run_inference(model: nn.Module, x: Tensor) -> Tensor:
+    # model produces depth in centimeters, but label is in millimeters
+    z = model(x)
+    z = z.float() * 10  # convert centimeters to millimeters
+    return TF.interpolate(
+        z,
+        size=globals.NYU_IMAGE_RESOLUTION,
+        mode="bilinear",
+        align_corners=False,
+    )
+
+
+@torch.no_grad()
+def benchmark_accuracy(
     model: nn.Module,
     dataset: NormalizedNyuDataset,
     device: torch.device,
-):
+) -> None:
     model.to(device)
     model.eval()
 
@@ -62,18 +94,8 @@ def eval_model(
     test_dataset = DataLoader(dataset)
     for item in tqdm(test_dataset, total=len(test_dataset)):
         x, y = item["image"].to(device), item["depth"].to(device)
-
-        # model produces depth in centimeters, but label is in millimeters
-        z = model(x)
-        z = z.float() * 10  # convert centimeters to millimeters
-        z = TF.interpolate(
-            z,
-            size=globals.NYU_IMAGE_RESOLUTION,
-            mode="bilinear",
-            align_corners=False,
-        )
-
         y = y.float()
+        z = run_inference(model, x)
         # mask = valid_depth_mask(y, z)
 
         total_delta1 += delta1(y, z)
@@ -90,15 +112,50 @@ def eval_model(
     logger.info(f"δ1 = {total_delta1 / valid_items:.3f}")
 
 
+@torch.no_grad()
+def benchmark_inference(
+    model: nn.Module,
+    dataset: NormalizedNyuDataset,
+    device: torch.device,
+    *,
+    warmup_steps: int = 5,
+) -> float:
+    model.to(device)
+    model.eval()
+
+    dataloader = DataLoader(dataset)
+
+    logger.info(f"Running inference benchmark on {device.type}...")
+    for step, item in enumerate(tqdm(dataloader, total=min(warmup_steps, len(dataloader)), desc=f"{device.type}-fps")):
+        x = item["image"].to(device)
+        run_inference(model, x)
+        if step + 1 > warmup_steps:
+            break
+
+    synchronize_device(device)
+    start_time = time.perf_counter()
+    measured_items = 0
+    for item in tqdm(dataloader, total=len(dataloader), desc=f"{device.type}-fps"):
+        x = item["image"].to(device)
+        run_inference(model, x)
+        measured_items += x.shape[0]
+    synchronize_device(device)
+    elapsed_seconds = time.perf_counter() - start_time
+
+    fps = measured_items / elapsed_seconds
+    logger.info(f"{device.type.upper()} inference FPS = {fps:.2f}")
+    return fps
+
+
 def main():
-    device = enable_hardware_acceleration(Config.DEFAULT)
-    model = Meter(device, "xxs")
-    state_dict = torch.load("meter-models/build_model_best_nyu_xxs", map_location=device)
-    model.load_state_dict(state_dict)
-
     dataset = NormalizedNyuDataset("test")
-    eval_model(model, dataset, device)
+    device = enable_hardware_acceleration(Config.DEFAULT)
 
+    model = load_model(device)
+
+    benchmark_accuracy(model, dataset, device)
+    benchmark_inference(model, dataset, device)
+    benchmark_inference(model, dataset, torch.device("cpu"))
 
 if __name__ == "__main__":
     raise SystemExit(main())
