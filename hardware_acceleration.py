@@ -41,9 +41,12 @@ def _default_config(config: Config) -> torch.device:
     if torch.backends.mps.is_available():
         logger.warn('using torch mps backend')
         return torch.device('mps')
-    else:
-        logger.warn('using torch cpu backend')
-        return torch.device('cpu')
+    if torch.cuda.is_available():
+        logger.warn('using torch cuda backend')
+        return torch.device('cuda')
+
+    logger.warn('using torch cpu backend')
+    return torch.device('cpu')
 
 
 def _rx9060xt_config(config: Config) -> torch.device:
