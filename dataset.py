@@ -26,9 +26,8 @@ class NormalizedNyuDataset(Dataset):
     ) -> None:
         super().__init__()
         self.depth_divisor = 10.0
-        self.depth_unit_to_meters = 0.01
         self.samples = self._load_split(split)
-        self.normalize = v2.Normalize(*self._load_normalization_stats())
+        self.zscore_normalize = v2.Normalize(*self._load_normalization_stats())
 
     def _load_split(self, split: Literal["train", "test"]) -> pd.DataFrame:
         if not self.root.exists():
@@ -69,12 +68,15 @@ class NormalizedNyuDataset(Dataset):
     @staticmethod
     def _load_image_tensor(image_path: Path) -> Tensor:
         with Image.open(image_path) as image:
-            return TF.pil_to_tensor(image.convert("RGB")).float() / 255.0
+            return TF.pil_to_tensor(image.convert("RGB")).float()
+
+    def _normalize_image(self, image: Tensor) -> Tensor:
+        return self.zscore_normalize(image / 255.0)
 
     def _load_depth_tensor(self, depth_path: Path) -> Tensor:
         with Image.open(depth_path) as depth:
             depth_tensor = TF.pil_to_tensor(depth).float() / self.depth_divisor
-            return depth_tensor * self.depth_unit_to_meters
+            return depth_tensor
 
     def __len__(self) -> int:
         return self.samples.shape[0]
@@ -83,7 +85,7 @@ class NormalizedNyuDataset(Dataset):
         sample = self.samples.iloc[idx]
         image = self._load_image_tensor(self._resolve_sample_path(sample["image_path"]))
         depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"]))
-        image = self.normalize(image)
+        image = self._normalize_image(image)
 
         return {
             "image": image,
@@ -106,7 +108,7 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
                 v2.RandomHorizontalFlip(),
                 v2.ToImage(),
                 v2.ToDtype(FLOATING_PRECISION, scale=True),
-                self.normalize,
+                self.zscore_normalize,
             ]
         )
 
@@ -116,7 +118,7 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
                 v2.CenterCrop(128),
                 v2.ToImage(),
                 v2.ToDtype(FLOATING_PRECISION, scale=True),
-                self.normalize,
+                self.zscore_normalize,
             ]
         )
 
