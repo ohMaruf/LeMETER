@@ -1,6 +1,7 @@
+import json
+from typing import Literal, cast
+
 import torch
-import csv
-import os
 from globals import FLOATING_PRECISION
 from torchvision.transforms import v2
 from torchvision.transforms import functional as TF
@@ -9,78 +10,61 @@ from pathlib import Path
 from torch.utils.data import Dataset
 from torch import Tensor
 
+import pandas as pd
+
 NYU_DEPTH_V2 = "nyu-depth-v2"
 
-DATASET_SPECS = {
-    NYU_DEPTH_V2: {
-        "root": Path("preprocessed_datasets/nyu-depth-v2"),
-        "train_manifest": Path("data/nyu2_train.csv"),
-        "test_manifest": Path("data/nyu2_test.csv"),
-        "depth_divisor": 10.0,
-        "depth_unit_to_meters": 0.01,
-    },
-}
-
-
-class PreprocessedDepthDataset(Dataset):
-    """Loads paired RGB/depth samples from a preprocessed manifest."""
+class NormalizedNyuDataset(Dataset):
+    root = Path("preprocessed_datasets/nyu-depth-v2")
+    train_manifest_rel = Path("data/nyu2_train.csv")
+    test_manifest_rel = Path("data/nyu2_test.csv")
+    stats_rel = Path("stats.json")
 
     def __init__(
         self,
-        root_dir: str | Path,
-        manifest_path: str | Path,
-        depth_divisor: float = 1.0,
+        split: Literal["train", "test"],
     ) -> None:
         super().__init__()
-        self.root_dir = Path(root_dir)
-        self.manifest_path = Path(manifest_path)
-        self.depth_divisor = depth_divisor
-        self.samples = self._load_manifest()
+        self.depth_divisor = 10.0
+        self.depth_unit_to_meters = 0.01
+        self.samples = self._load_split(split)
+        self.normalize = v2.Normalize(*self._load_normalization_stats())
 
-    def _load_manifest(self) -> list[dict[str, Path]]:
-        if not self.root_dir.exists():
-            raise FileNotFoundError(f"Dataset root does not exist: {self.root_dir}")  # noqa: E501
-        if not self.manifest_path.exists():
-            raise FileNotFoundError(
-                f"Dataset manifest does not exist: {self.manifest_path}"
-            )  # noqa: E501
+    def _load_split(self, split: Literal["train", "test"]) -> pd.DataFrame:
+        if not self.root.exists():
+            raise FileNotFoundError(f"Dataset root does not exist: {self.root}")
 
-        samples: list[dict[str, Path]] = []
-        with self.manifest_path.open(newline="", encoding="utf-8") as handle:
-            reader = csv.reader(handle)
-            for row_index, row in enumerate(reader, start=1):
-                if not row:
-                    continue
-                if len(row) < 2:
-                    raise ValueError(
-                        f"Malformed manifest row {row_index} in {self.manifest_path}: {row}"  # noqa: E501
-                    )
+        train_manifest_path = self.root / self.train_manifest_rel
+        test_manifest_path = self.root / self.test_manifest_rel
 
-                image_rel_path = Path(row[0])
-                depth_rel_path = Path(row[1])
-                image_path = self.root_dir / image_rel_path
-                depth_path = self.root_dir / depth_rel_path
+        if not train_manifest_path.exists():
+            raise FileNotFoundError(f"Dataset manifest does not exist: {train_manifest_path}")
+        if not test_manifest_path.exists():
+            raise FileNotFoundError(f"Dataset manifest does not exist: {test_manifest_path}")
 
-                if not image_path.exists():
-                    raise FileNotFoundError(
-                        f"Missing RGB image referenced by manifest: {image_path}"
-                    )  # noqa: E501
-                if not depth_path.exists():
-                    raise FileNotFoundError(
-                        f"Missing depth map referenced by manifest: {depth_path}"
-                    )  # noqa: E501
+        if split == "test":
+            return cast(
+                pd.DataFrame,
+                pd.read_csv(test_manifest_path, names=["image_path", "depth_path"], header=None),
+            )
 
-                samples.append(
-                    {
-                        "image_path": image_path,
-                        "depth_path": depth_path,
-                    }
-                )
+        return cast(
+            pd.DataFrame,
+            pd.read_csv(train_manifest_path, names=["image_path", "depth_path"], header=None),
+        )
 
-        if not samples:
-            raise ValueError(f"Manifest is empty: {self.manifest_path}")
+    def _load_normalization_stats(self) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        stats_path = self.root / self.stats_rel
+        if not stats_path.exists():
+            raise FileNotFoundError(f"Dataset stats file does not exist: {stats_path}")
 
-        return samples
+        stats = json.loads(stats_path.read_text(encoding="utf-8"))
+        mean = tuple(float(value) for value in stats["mean_rgb"])
+        std = tuple(float(value) for value in stats["std_rgb"])
+        return mean, std
+
+    def _resolve_sample_path(self, relative_path: str) -> Path:
+        return self.root / Path(relative_path)
 
     @staticmethod
     def _load_image_tensor(image_path: Path) -> Tensor:
@@ -89,15 +73,17 @@ class PreprocessedDepthDataset(Dataset):
 
     def _load_depth_tensor(self, depth_path: Path) -> Tensor:
         with Image.open(depth_path) as depth:
-            return TF.pil_to_tensor(depth).float() / self.depth_divisor
+            depth_tensor = TF.pil_to_tensor(depth).float() / self.depth_divisor
+            return depth_tensor * self.depth_unit_to_meters
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return self.samples.shape[0]
 
     def __getitem__(self, idx: int) -> dict[str, Tensor]:
-        sample = self.samples[idx]
-        image = self._load_image_tensor(sample["image_path"])
-        depth = self._load_depth_tensor(sample["depth_path"])
+        sample = self.samples.iloc[idx]
+        image = self._load_image_tensor(self._resolve_sample_path(sample["image_path"]))
+        depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"]))
+        image = self.normalize(image)
 
         return {
             "image": image,
@@ -105,15 +91,9 @@ class PreprocessedDepthDataset(Dataset):
         }
 
 
-class AugmentedDepthDataset(PreprocessedDepthDataset):
-    def __init__(
-        self,
-        root_dir: str | Path,
-        manifest_path: str | Path,
-        depth_divisor: float = 1.0,
-        views=1,
-    ) -> None:
-        super().__init__(root_dir, manifest_path, depth_divisor)
+class AugmentedNyuDataset(NormalizedNyuDataset):
+    def __init__(self, split: Literal["train", "test"], views=1,) -> None:
+        super().__init__(split)
 
         self.views = views
         self.augmentation = v2.Compose(
@@ -126,7 +106,7 @@ class AugmentedDepthDataset(PreprocessedDepthDataset):
                 v2.RandomHorizontalFlip(),
                 v2.ToImage(),
                 v2.ToDtype(FLOATING_PRECISION, scale=True),
-                v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # noqa: E501
+                self.normalize,
             ]
         )
 
@@ -136,49 +116,26 @@ class AugmentedDepthDataset(PreprocessedDepthDataset):
                 v2.CenterCrop(128),
                 v2.ToImage(),
                 v2.ToDtype(FLOATING_PRECISION, scale=True),
-                v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),  # noqa: E501
+                self.normalize,
             ]
         )
 
     def __getitem__(self, idx):
-        item = super().__getitem__(idx)
-        image = item["image"]
+        sample = self.samples.iloc[idx]
+        image = self._load_image_tensor(self._resolve_sample_path(sample["image_path"]))
+        depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"]))
         transform = self.augmentation if self.views > 1 else self.test
-        return torch.stack([transform(image) for _ in range(self.views)]), item["depth"]  # noqa: E501
+        return torch.stack([transform(image) for _ in range(self.views)]), depth  # noqa: E501
 
 
-def build_dataset(split: str, views: int = 1) -> PreprocessedDepthDataset:
-    spec = DATASET_SPECS[NYU_DEPTH_V2]
-    if split == "train":
-        manifest_key = "train_manifest"
-    elif split == "test":
-        manifest_key = "test_manifest"
-    else:
-        raise ValueError(f"Unsupported split: {split}")
-
-    root_dir = Path(spec["root"])
-    manifest_path = root_dir / Path(spec[manifest_key])
-    return PreprocessedDepthDataset(
-        root_dir=root_dir,
-        manifest_path=manifest_path,
-        depth_divisor=float(spec.get("depth_divisor", 1.0)),
+def build_dataset(split: Literal["train", "test"]) -> NormalizedNyuDataset:
+    return NormalizedNyuDataset(
+        split=split,
     )
 
 
-def build_augmented_dataset(split: str, views: int = 1) -> AugmentedDepthDataset:
-    spec = DATASET_SPECS[NYU_DEPTH_V2]
-    if split == "train":
-        manifest_key = "train_manifest"
-    elif split == "test":
-        manifest_key = "test_manifest"
-    else:
-        raise ValueError(f"Unsupported split: {split}")
-
-    root_dir = Path(spec["root"])
-    manifest_path = root_dir / Path(spec[manifest_key])
-    return AugmentedDepthDataset(
-        root_dir=root_dir,
-        manifest_path=manifest_path,
-        depth_divisor=float(spec.get("depth_divisor", 1.0)),
+def build_augmented_dataset(split: Literal["train", "test"], views: int = 1) -> AugmentedNyuDataset:
+    return AugmentedNyuDataset(
+        split=split,
         views=views,
     )
