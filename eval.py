@@ -16,9 +16,10 @@ def valid_depth_mask(y: Tensor, z: Tensor) -> Tensor:
     return (y > 0) & torch.isfinite(y) & torch.isfinite(z)
 
 
-def delta1(y: Tensor, z: Tensor, mask: Tensor, threshold=1.25, eps=1e-8) -> float:
-    y = y[mask]
-    z = z[mask]
+def delta1(y: Tensor, z: Tensor, mask: Tensor = None, threshold=1.25, eps=1e-8) -> float:
+    if mask is not None:
+        y = y[mask]
+        z = z[mask]
     if y.numel() == 0:
         return float("nan")
     y = y.clamp_min(eps)
@@ -27,17 +28,19 @@ def delta1(y: Tensor, z: Tensor, mask: Tensor, threshold=1.25, eps=1e-8) -> floa
     return torch.mean((ratio < threshold).float()).item()
 
 
-def rel(y: Tensor, z: Tensor, mask: Tensor, eps=1e-8) -> float:
-    y = y[mask]
-    z = z[mask]
+def rel(y: Tensor, z: Tensor, mask: Tensor = None, eps=1e-8) -> float:
+    if mask is not None:
+        y = y[mask]
+        z = z[mask]
     if y.numel() == 0:
         return float("nan")
     return torch.mean(torch.abs(z - y) / (y + eps)).item()
 
 
-def rmse(y: Tensor, z: Tensor, mask: Tensor) -> float:
-    y = y[mask]
-    z = z[mask]
+def rmse(y: Tensor, z: Tensor, mask: Tensor = None) -> float:
+    if mask is not None:
+        y = y[mask]
+        z = z[mask]
     if y.numel() == 0:
         return float("nan")
     return ((y - z).square().mean()).sqrt().item()
@@ -71,13 +74,11 @@ def eval_model(
         )
 
         y = y.float()
-        mask = valid_depth_mask(y, z)
-        if not mask.any():
-            continue
+        # mask = valid_depth_mask(y, z)
 
-        total_delta1 += delta1(y, z, mask)
-        total_rel += rel(y, z, mask)
-        total_rmse += rmse(y, z, mask)
+        total_delta1 += delta1(y, z)
+        total_rel += rel(y, z)
+        total_rmse += rmse(y, z)
         valid_items += 1
 
     if valid_items == 0:
