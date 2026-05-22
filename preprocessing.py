@@ -1,9 +1,10 @@
+import csv
 import json
+import os
 import shutil
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import cast
 
-import pandas as pd
 import torch
 from torchvision.io import ImageReadMode, read_image, write_jpeg, write_png
 from torchvision.transforms.functional import InterpolationMode, resize
@@ -19,6 +20,9 @@ NYU_TEST_CSV = NYU_DATASET_ROOT / Path("data/nyu2_test.csv")
 NYU_PREPROCESSED_ROOT = Path("preprocessed_datasets/nyu-depth-v2")
 NYU_COMPLETE_MARKER = Path("preprocessed_datasets/.complete") / NYU_DATASET_NAME
 NYU_STATS_PATH = NYU_PREPROCESSED_ROOT / "stats.json"
+NYU_WORKER_COUNT = min(8, os.cpu_count() or 1)
+NYU_CHUNK_SIZE = 256
+ManifestRow = tuple[str, str]
 
 
 class ChannelStats:
@@ -47,6 +51,26 @@ class ChannelStats:
             "pixel_count_per_channel": self.pixel_count,
         }
 
+    def merge(self, other: "ChannelStats") -> None:
+        self.sum += other.sum
+        self.sum_sq += other.sum_sq
+        self.pixel_count += other.pixel_count
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "sum": self.sum.tolist(),
+            "sum_sq": self.sum_sq.tolist(),
+            "pixel_count": self.pixel_count,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, object]) -> "ChannelStats":
+        stats = cls()
+        stats.sum = torch.tensor(payload["sum"], dtype=torch.float64)
+        stats.sum_sq = torch.tensor(payload["sum_sq"], dtype=torch.float64)
+        stats.pixel_count = int(payload["pixel_count"])
+        return stats
+
 
 def copy_with_parents(source_path: Path, destination_path: Path) -> None:
     destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +87,15 @@ def save_image_tensor(image: torch.Tensor, destination_path: Path) -> None:
         write_png(image, str(destination_path))
         return
     raise ValueError(f"Unsupported image format: {destination_path.suffix}")
+
+
+def load_manifest_rows(csv_path: Path) -> list[ManifestRow]:
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        return [tuple(row[:2]) for row in csv.reader(handle) if row]
+
+
+def chunk_rows(rows: list[ManifestRow], chunk_size: int) -> list[list[ManifestRow]]:
+    return [rows[index:index + chunk_size] for index in range(0, len(rows), chunk_size)]
 
 
 def preprocess_nyu_pair(
@@ -102,6 +135,23 @@ def preprocess_nyu_pair(
     return resized
 
 
+def preprocess_nyu_chunk(
+    rows: list[ManifestRow],
+    *,
+    collect_stats: bool,
+) -> dict[str, object]:
+    stats = ChannelStats()
+    for image_rel_path, depth_rel_path in rows:
+        resized = preprocess_nyu_pair(image_rel_path, depth_rel_path)
+        if collect_stats:
+            stats.update(resized)
+
+    return {
+        "processed_count": len(rows),
+        "stats": stats.to_payload() if collect_stats else None,
+    }
+
+
 def write_nyu_stats(stats: ChannelStats) -> Path:
     NYU_STATS_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -120,26 +170,52 @@ def write_nyu_completion_marker() -> Path:
     return NYU_COMPLETE_MARKER
 
 
+def preprocess_split(
+    rows: list[ManifestRow],
+    *,
+    split_name: str,
+    collect_stats: bool,
+) -> ChannelStats | None:
+    if not rows:
+        return ChannelStats() if collect_stats else None
+
+    logger.info(f"Preprocessing {split_name} split of {NYU_DATASET_NAME}...")
+    stats = ChannelStats() if collect_stats else None
+    chunks = chunk_rows(rows, NYU_CHUNK_SIZE)
+
+    with ProcessPoolExecutor(max_workers=NYU_WORKER_COUNT) as executor:
+        futures = [
+            executor.submit(preprocess_nyu_chunk, chunk, collect_stats=collect_stats)
+            for chunk in chunks
+        ]
+        with tqdm(total=len(rows), desc=split_name) as progress:
+            for future in as_completed(futures):
+                result = future.result()
+                progress.update(int(result["processed_count"]))
+                if collect_stats:
+                    stats_payload = result["stats"]
+                    if stats_payload is not None and stats is not None:
+                        stats.merge(ChannelStats.from_payload(stats_payload))
+
+    return stats
+
+
 def preprocess_nyu_depth_v2() -> None:
     if NYU_COMPLETE_MARKER.exists():
         logger.info(f"Skipping {NYU_DATASET_NAME}: completion marker exists at {NYU_COMPLETE_MARKER}")
         logger.info(f"Preprocessing of {NYU_DATASET_NAME} is complete")
         return
 
-    train_df = cast(pd.DataFrame, pd.read_csv(NYU_TRAIN_CSV, header=None))
-    test_df = cast(pd.DataFrame, pd.read_csv(NYU_TEST_CSV, header=None))
-    train_stats = ChannelStats()
+    train_rows = load_manifest_rows(NYU_TRAIN_CSV)
+    test_rows = load_manifest_rows(NYU_TEST_CSV)
 
-    logger.info(f"Preprocessing train split of {NYU_DATASET_NAME}...")
-    for row in tqdm(train_df.itertuples(), total=len(train_df)):
-        resized = preprocess_nyu_pair(*row[1:])
-        train_stats.update(resized)
+    train_stats = preprocess_split(train_rows, split_name="train", collect_stats=True)
+    preprocess_split(test_rows, split_name="test", collect_stats=False)
 
-    logger.info(f"Preprocessing test split of {NYU_DATASET_NAME}...")
-    for row in tqdm(test_df.itertuples(), total=len(test_df)):
-        preprocess_nyu_pair(*row[1:])
+    total_pairs = len(train_rows) + len(test_rows)
+    if train_stats is None:
+        raise ValueError("Train stats were not collected")
 
-    total_pairs = len(train_df) + len(test_df)
     stats_path = write_nyu_stats(train_stats)
     marker = write_nyu_completion_marker()
     logger.log(f"Preprocessed {total_pairs} pairs into {NYU_PREPROCESSED_ROOT}")
