@@ -1,7 +1,6 @@
 import json
-from typing import Literal, cast
-
 import torch
+import pandas as pd
 from globals import FLOATING_PRECISION
 from torchvision.transforms import v2
 from torchvision.transforms import functional as TF
@@ -9,8 +8,8 @@ from PIL import Image
 from pathlib import Path
 from torch.utils.data import Dataset
 from torch import Tensor
+from typing import Literal, cast
 
-import pandas as pd
 
 class NormalizedNyuDataset(Dataset):
     root = Path("preprocessed_datasets/nyu-depth-v2")
@@ -34,19 +33,27 @@ class NormalizedNyuDataset(Dataset):
         test_manifest_path = self.root / self.test_manifest_rel
 
         if not train_manifest_path.exists():
-            raise FileNotFoundError(f"Dataset manifest does not exist: {train_manifest_path}")
+            raise FileNotFoundError(
+                f"Dataset manifest does not exist: {train_manifest_path}"
+            )
         if not test_manifest_path.exists():
-            raise FileNotFoundError(f"Dataset manifest does not exist: {test_manifest_path}")
+            raise FileNotFoundError(
+                f"Dataset manifest does not exist: {test_manifest_path}"
+            )
 
         if split == "test":
             return cast(
                 pd.DataFrame,
-                pd.read_csv(test_manifest_path, names=["image_path", "depth_path"], header=None),
+                pd.read_csv(
+                    test_manifest_path, names=["image_path", "depth_path"], header=None
+                ),
             )
 
         return cast(
             pd.DataFrame,
-            pd.read_csv(train_manifest_path, names=["image_path", "depth_path"], header=None),
+            pd.read_csv(
+                train_manifest_path, names=["image_path", "depth_path"], header=None
+            ),
         )
 
     def _load_normalization_stats(self) -> tuple[tuple[float, ...], tuple[float, ...]]:
@@ -92,7 +99,11 @@ class NormalizedNyuDataset(Dataset):
 
 
 class AugmentedNyuDataset(NormalizedNyuDataset):
-    def __init__(self, split: Literal["train", "test"], views=1,) -> None:
+    def __init__(
+        self,
+        split: Literal["train", "test"],
+        views=1,
+    ) -> None:
         super().__init__(split)
 
         self.views = views

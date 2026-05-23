@@ -18,7 +18,13 @@ def valid_depth_mask(y: Tensor, z: Tensor) -> Tensor:
     return (y > 0) & torch.isfinite(y) & torch.isfinite(z)
 
 
-def delta1(y: Tensor, z: Tensor, mask: Tensor = None, threshold=1.25, eps=1e-8) -> float:
+def delta1(
+    y: Tensor,
+    z: Tensor,
+    mask: Tensor | None = None,
+    threshold=1.25,
+    eps=1e-8,
+) -> float:
     if mask is not None:
         y = y[mask]
         z = z[mask]
@@ -30,7 +36,12 @@ def delta1(y: Tensor, z: Tensor, mask: Tensor = None, threshold=1.25, eps=1e-8) 
     return torch.mean((ratio < threshold).float()).item()
 
 
-def rel(y: Tensor, z: Tensor, mask: Tensor = None, eps=1e-8) -> float:
+def rel(
+    y: Tensor,
+    z: Tensor,
+    mask: Tensor | None = None,
+    eps=1e-8,
+) -> float:
     if mask is not None:
         y = y[mask]
         z = z[mask]
@@ -39,7 +50,11 @@ def rel(y: Tensor, z: Tensor, mask: Tensor = None, eps=1e-8) -> float:
     return torch.mean(torch.abs(z - y) / (y + eps)).item()
 
 
-def rmse(y: Tensor, z: Tensor, mask: Tensor = None) -> float:
+def rmse(
+    y: Tensor,
+    z: Tensor,
+    mask: Tensor | None = None,
+) -> float:
     if mask is not None:
         y = y[mask]
         z = z[mask]
@@ -57,7 +72,9 @@ def synchronize_device(device: torch.device) -> None:
 
 def load_model(device: torch.device) -> nn.Module:
     model = Meter(device, "xxs")
-    state_dict = torch.load("meter-models/build_model_best_nyu_xxs", map_location=device)
+    state_dict = torch.load(
+        "meter-models/build_model_best_nyu_xxs", map_location=device
+    )
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
@@ -89,22 +106,18 @@ def benchmark_accuracy(
     total_delta1 = 0.0
     total_rel = 0.0
     total_rmse = 0.0
-    valid_items = 0
 
     test_dataset = DataLoader(dataset)
     for item in tqdm(test_dataset, total=len(test_dataset)):
         x, y = item["image"].to(device), item["depth"].to(device)
         y = y.float()
         z = run_inference(model, x)
-        # mask = valid_depth_mask(y, z)
 
         total_delta1 += delta1(y, z)
         total_rel += rel(y, z)
         total_rmse += rmse(y, z)
-        valid_items += 1
 
-    if valid_items == 0:
-        raise ValueError("Evaluation dataset did not contain any valid depth pixels.")
+    valid_items = len(test_dataset)
 
     # factor 1000, because we want RMSE in meters, not millimeters
     logger.info(f"RMSE = {total_rmse / (1000 * valid_items):.3f}")
@@ -126,7 +139,13 @@ def benchmark_inference(
     dataloader = DataLoader(dataset)
 
     logger.info(f"Running inference benchmark on {device.type}...")
-    for step, item in enumerate(tqdm(dataloader, total=min(warmup_steps, len(dataloader)), desc=f"{device.type}-fps")):
+    for step, item in enumerate(
+        tqdm(
+            dataloader,
+            total=min(warmup_steps, len(dataloader)),
+            desc=f"{device.type}-fps",
+        )
+    ):
         x = item["image"].to(device)
         run_inference(model, x)
         if step + 1 > warmup_steps:
@@ -156,6 +175,7 @@ def main():
     benchmark_accuracy(model, dataset, device)
     benchmark_inference(model, dataset, device)
     benchmark_inference(model, dataset, torch.device("cpu"))
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

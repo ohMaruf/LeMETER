@@ -2,12 +2,11 @@ import csv
 import json
 import os
 import shutil
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from pathlib import Path
-
 import torch
-from torchvision.io import ImageReadMode, read_image, write_jpeg, write_png
-from torchvision.transforms.functional import InterpolationMode, resize
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from torchvision.transforms.functional import to_tensor, to_pil_image
+from pathlib import Path
+from PIL import Image
 from tqdm import tqdm
 
 import logger
@@ -79,12 +78,14 @@ def copy_with_parents(source_path: Path, destination_path: Path) -> None:
 
 def save_image_tensor(image: torch.Tensor, destination_path: Path) -> None:
     destination_path.parent.mkdir(parents=True, exist_ok=True)
-    image = image.to("cpu", dtype=torch.uint8)
+    image = image.to("cpu", dtype=torch.float32)
+    image = image.clamp(0, 255).round().to(torch.uint8)
+    pil_image = to_pil_image(image, mode="RGB")
     if destination_path.suffix.lower() in {".jpg", ".jpeg"}:
-        write_jpeg(image, str(destination_path), quality=100)
+        pil_image.save(destination_path, quality=100)
         return
     if destination_path.suffix.lower() == ".png":
-        write_png(image, str(destination_path))
+        pil_image.save(destination_path)
         return
     raise ValueError(f"Unsupported image format: {destination_path.suffix}")
 
@@ -95,7 +96,9 @@ def load_manifest_rows(csv_path: Path) -> list[ManifestRow]:
 
 
 def chunk_rows(rows: list[ManifestRow], chunk_size: int) -> list[list[ManifestRow]]:
-    return [rows[index:index + chunk_size] for index in range(0, len(rows), chunk_size)]
+    return [
+        rows[index : index + chunk_size] for index in range(0, len(rows), chunk_size)
+    ]
 
 
 def preprocess_nyu_pair(
@@ -108,31 +111,39 @@ def preprocess_nyu_pair(
     target_depth_path = NYU_PREPROCESSED_ROOT / depth_rel_path
 
     for path, label in (
-            (source_image_path, "RGB image"),
-            (source_depth_path, "depth map"),
+        (source_image_path, "RGB image"),
+        (source_depth_path, "depth map"),
     ):
         if not path.exists():
             raise FileNotFoundError(f"Missing {label}: {path}")
 
-    image = read_image(str(source_image_path), mode=ImageReadMode.RGB)
-    if tuple(image.shape[-2:]) != NYU_IMAGE_RESOLUTION:
-        raise ValueError(
-            f"Unexpected input size for {source_image_path}: "
-            f"expected {NYU_IMAGE_RESOLUTION}, found {tuple(image.shape[-2:])}"
+    with Image.open(source_image_path) as image:
+        if image.mode != "RGB":
+            rgb_image = image.convert("RGB")
+        else:
+            rgb_image = image
+
+        actual_resolution = (rgb_image.height, rgb_image.width)
+        if actual_resolution != NYU_IMAGE_RESOLUTION:
+            raise ValueError(
+                f"Unexpected input size for {source_image_path}: "
+                f"expected {NYU_IMAGE_RESOLUTION}, found {actual_resolution}"
+            )
+
+        resized = rgb_image.resize(
+            (INPUT_RESOLUTION[1], INPUT_RESOLUTION[0]),
+            # resample=Image.Resampling.LANCZOS,
+            resample=Image.Resampling.BICUBIC,
         )
 
-    resized = resize(
-        image.to(dtype=torch.float32),
-        list(INPUT_RESOLUTION),
-        interpolation=InterpolationMode.BICUBIC,
-        antialias=True,
-    )
-    save_image_tensor(
-        resized.clamp_(0, 255).round_(),
-        target_image_path,
-    )
+        resized_tensor = to_tensor(resized) * 255
+
+        save_image_tensor(
+            resized_tensor,
+            target_image_path,
+        )
     copy_with_parents(source_depth_path, target_depth_path)
-    return resized
+    return resized_tensor
 
 
 def preprocess_nyu_chunk(
@@ -209,7 +220,9 @@ def preprocess_split(
 
 def preprocess_nyu_depth_v2() -> None:
     if NYU_COMPLETE_MARKER.exists():
-        logger.info(f"Skipping {NYU_DATASET_NAME}: completion marker exists at {NYU_COMPLETE_MARKER}")
+        logger.info(
+            f"Skipping {NYU_DATASET_NAME}: completion marker exists at {NYU_COMPLETE_MARKER}"
+        )
         logger.info(f"Preprocessing of {NYU_DATASET_NAME} is complete")
         return
 
@@ -228,10 +241,10 @@ def preprocess_nyu_depth_v2() -> None:
 
     stats_path = write_nyu_stats(train_stats)
     marker = write_nyu_completion_marker()
-    logger.log(f"Preprocessed {total_pairs} pairs into {NYU_PREPROCESSED_ROOT}")
-    logger.log(f"Wrote RGB channel stats: {stats_path}")
-    logger.log(f"Wrote completion marker: {marker}")
-    logger.log(f"Preprocessing of {NYU_DATASET_NAME} is complete")
+    logger.info(f"Preprocessed {total_pairs} pairs into {NYU_PREPROCESSED_ROOT}")
+    logger.info(f"Wrote RGB channel stats: {stats_path}")
+    logger.info(f"Wrote completion marker: {marker}")
+    logger.info(f"Preprocessing of {NYU_DATASET_NAME} is complete")
 
 
 def preprocess_datasets() -> None:
