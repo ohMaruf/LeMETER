@@ -1,7 +1,7 @@
 import json
 import torch
 import pandas as pd
-from globals import FLOATING_PRECISION
+from globals import FLOATING_PRECISION, INPUT_RESOLUTION
 from torchvision.transforms import v2
 from torchvision.transforms import functional as TF
 from PIL import Image
@@ -109,7 +109,10 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         self.views = views
         self.augmentation = v2.Compose(
             [
-                v2.RandomResizedCrop(128, scale=(0.08, 1.0)),
+                v2.RandomResizedCrop(
+                    size=(INPUT_RESOLUTION[0] // 2, INPUT_RESOLUTION[1] // 2),
+                ),
+                v2.Resize(INPUT_RESOLUTION),
                 v2.RandomApply([v2.ColorJitter(0.8, 0.8, 0.8, 0.2)], p=0.8),
                 v2.RandomGrayscale(p=0.2),
                 v2.RandomApply([v2.GaussianBlur(kernel_size=7, sigma=(0.1, 2.0))]),  # noqa: E501
@@ -123,8 +126,7 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
 
         self.test = v2.Compose(
             [
-                v2.Resize(128),
-                v2.CenterCrop(128),
+                v2.Resize(INPUT_RESOLUTION),
                 v2.ToImage(),
                 v2.ToDtype(FLOATING_PRECISION, scale=True),
                 self.zscore_normalize,

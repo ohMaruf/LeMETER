@@ -2,7 +2,7 @@ import torch
 import tqdm
 import logger
 import globals
-
+import json
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from torch.utils.data import DataLoader
 from dataset import AugmentedNyuDataset
@@ -10,10 +10,17 @@ from meter import MeterEncoder
 from torch.amp import GradScaler, autocast
 from hardware_acceleration import Config, enable_hardware_acceleration
 from sigreg import SigReg
+from pathlib import Path
+
+OUTPUT_DIR = Path("runs/lemeter")
+CHECKPOINT_PATH = OUTPUT_DIR / "last_checkpoint.pt"
 
 
 def pretrain_lejepa_encoder():
+    RESUME = True
     DEVICE = enable_hardware_acceleration(Config.RX9060XT)
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     encoder = MeterEncoder(DEVICE, "xxs").to(DEVICE)
     train_ds = AugmentedNyuDataset("train", globals.VIEWS)
@@ -46,17 +53,34 @@ def pretrain_lejepa_encoder():
         milestones=[warmup_steps],
     )
 
+    history = {
+        "sigreg_loss": [],
+        "lejepa_loss": [],
+    }
+
+    start_epoch = 0
+    if RESUME and CHECKPOINT_PATH.exists():
+        ckpt = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+        encoder.load_state_dict(ckpt["model_state"])
+        opt.load_state_dict(ckpt["optimizer_state"])
+        history = ckpt.get("history", history)
+        start_epoch = int(ckpt.get("epoch", 0)) + 1
+        logger.warn(f"resumed from {CHECKPOINT_PATH} at epoch #{start_epoch}")
+
     scaler = GradScaler()
-    for epoch in range(globals.NUM_EPOCHS):
+    for epoch in range(start_epoch, globals.NUM_EPOCHS):
         encoder.train()  # , probe.train()
         for views, y in tqdm.tqdm(train, total=len(train)):
             with autocast("cuda", dtype=torch.float16):
                 views = views.to(DEVICE, non_blocking=True)
                 y = y.to(DEVICE, non_blocking=True)
-                emb, proj = encoder(views)
+                # _, proj = encoder(views)
+                _, proj, _ = encoder(views)
                 inv_loss = (proj.mean(0) - proj).square().mean()
                 sigreg_loss = sigreg(proj)
-                lejepa_loss = sigreg_loss * globals.LAMBDA + inv_loss * (1 - globals.LAMBDA)
+                lejepa_loss = sigreg_loss * globals.LAMBDA + inv_loss * (
+                    1 - globals.LAMBDA
+                )
                 # y_rep, yhat = y.repeat_interleave(VIEWS), probe(emb.detach())
                 # probe_loss = TF.cross_entropy(yhat, y_rep)
                 loss = lejepa_loss  # + probe_loss
@@ -67,17 +91,43 @@ def pretrain_lejepa_encoder():
             scaler.update()
             scheduler.step()
 
-            # logger.info(f'[{epoch}/{NUM_EPOCHS}] train/probe {probe_loss.item()}')  # noqa: E501
+            # logger.info(f'[{epoch}/{NUM_EPOCHS}] train/probe {probe_loss.item()}')
             logger.info(
                 f"[{epoch}/{globals.NUM_EPOCHS}] train/lejepa {lejepa_loss.item()}"
-            )  # noqa: E501
+            )
             logger.info(
                 f"[{epoch}/{globals.NUM_EPOCHS}] train/sigreg {sigreg_loss.item()}"
-            )  # noqa: E501
+            )
             logger.info(
                 f"[{epoch}/{globals.NUM_EPOCHS}] train/inv_loss {inv_loss.item()}"
-            )  # noqa: E501
+            )
+
+        history["sigreg_loss"].append(sigreg_loss)
+        history["lejepa_loss"].append(lejepa_loss)
+
+        checkpoint = {
+            "epoch": epoch,
+            "model_state": encoder.state_dict(),
+            "optimizer_state": opt.state_dict(),
+        }
+
+        torch.save(checkpoint, CHECKPOINT_PATH)
+
+    with open(OUTPUT_DIR / "losses.json") as losses_file:
+        json.dump(history, losses_file)
+
+
+def main():
+    pretrain_lejepa_encoder()
+
+    # todo list pretraining
+    # [x] add checkpoints
+    # [ ] track loss across epochs to build charts loss vs epocs
+
+    # todo list training
+    # [ ] track loss across epochs to build charts loss vs epocs
+    # [ ] track accuracy on test set over epochs to build chart accuracy vs epocs
 
 
 if __name__ == "__main__":
-    raise SystemExit(pretrain_lejepa_encoder())
+    raise SystemExit(main())
