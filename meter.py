@@ -288,21 +288,21 @@ class MobileViT(nn.Module):
         return x, [y0, y1, y2, y3]
 
 
-def mobilevit_xxs():
+def mobilevit_xxs() -> tuple[MobileViT, str]:
     enc_type = "xxs"
     dims = [64, 80, 96]
     channels = [16, 16, 24, 24, 48, 48, 64, 64, 80, 80, 160]  # 320
     return MobileViT(INPUT_RESOLUTION, dims, channels, expansion=2), enc_type
 
 
-def mobilevit_xs():
+def mobilevit_xs() -> tuple[MobileViT, str]:
     enc_type = "xs"
     dims = [96, 120, 144]
     channels = [16, 32, 48, 48, 64, 64, 80, 80, 96, 96, 192]  # 384
     return MobileViT(INPUT_RESOLUTION, dims, channels), enc_type
 
 
-def mobilevit_s():
+def mobilevit_s() -> tuple[MobileViT, str]:
     enc_type = "s"
     dims = [144, 192, 240]
     channels = [16, 32, 64, 64, 96, 96, 128, 128, 160, 160, 320]
@@ -412,18 +412,23 @@ class Meter(nn.Module):
         x = self.decoder(x, enc_layer)
         return x
 
+    @staticmethod
+    def load(device: torch.device, dataset: Literal["nyu", "kitti"] = "nyu", arch: MeterArchitecture = "xxs") -> Meter:
+        model = Meter(device, arch)
+        state_dict = torch.load(
+            f"meter-models/build_model_best_{dataset}_{arch}", map_location=device
+        )
+        model.load_state_dict(state_dict)
+        model.to(device)
+        model.eval()
+        return model
 
-class MeterEncoder(nn.Module):
-    def __init__(self, device: torch.device, arch_type: MeterArchitecture):
-        super(MeterEncoder, self).__init__()
 
-        if arch_type == "s":
-            self.encoder, enc_type = mobilevit_s()
-        elif arch_type == "xs":
-            self.encoder, enc_type = mobilevit_xs()
-        else:
-            self.encoder, enc_type = mobilevit_xxs()
+class LeMeterEncoder(nn.Module):
+    def __init__(self, device: torch.device, encoder: MobileViT):
+        super(LeMeterEncoder, self).__init__()
 
+        self.encoder = encoder
         self.pred = MLP(
             EMBEDDING_DIM,
             [4 * EMBEDDING_DIM, 4 * EMBEDDING_DIM, PROJ_DIM],
@@ -432,12 +437,10 @@ class MeterEncoder(nn.Module):
 
     def forward(self, x):
         N, V = x.shape[:2]
-
         x = x.flatten(0, 1)
 
         features, skip_connections = self.encoder(x)
         emb = features[0] if isinstance(features, (tuple, list)) else features
-
         if emb.dim() == 4:
             emb = emb.mean(dim=[2, 3])
 
@@ -447,9 +450,9 @@ class MeterEncoder(nn.Module):
 
 
 class LeMeter(nn.Module):
-    def __init__(self, device: torch.device, arch_type: MeterArchitecture):
+    def __init__(self, device: torch.device, arch_type: MeterArchitecture, encoder: MobileViT):
         super().__init__()
-        self.encoder = MeterEncoder(device=device, arch_type=arch_type)
+        self.encoder = encoder
         self.decoder = MeterDecoder(device=device, typ=arch_type)
 
     def forward(self, x):

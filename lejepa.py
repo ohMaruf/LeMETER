@@ -6,7 +6,7 @@ import json
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from torch.utils.data import DataLoader
 from dataset import AugmentedNyuDataset
-from meter import MeterEncoder
+from meter import LeMeterEncoder, Meter
 from torch.amp import GradScaler, autocast
 from hardware_acceleration import Config, enable_hardware_acceleration
 from sigreg import SigReg
@@ -18,11 +18,14 @@ CHECKPOINT_PATH = OUTPUT_DIR / "last_checkpoint.pt"
 
 def pretrain_lejepa_encoder():
     RESUME = True
-    DEVICE = enable_hardware_acceleration(Config.RX9060XT)
+    DEVICE = enable_hardware_acceleration(Config.DEFAULT)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    encoder = MeterEncoder(DEVICE, "xxs").to(DEVICE)
+    meter = Meter.load(DEVICE, "nyu", "xxs")
+    meter.train()
+
+    encoder = LeMeterEncoder(DEVICE, meter.encoder).to(DEVICE)
     train_ds = AugmentedNyuDataset("train", globals.VIEWS)
     train = DataLoader(
         train_ds,
@@ -67,11 +70,11 @@ def pretrain_lejepa_encoder():
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         logger.warn(f"resumed from {CHECKPOINT_PATH} at epoch #{start_epoch}")
 
-    scaler = GradScaler()
+    scaler = GradScaler(device=DEVICE.type, enabled=True)
     for epoch in range(start_epoch, globals.NUM_EPOCHS):
         encoder.train()  # , probe.train()
         for views, y in tqdm.tqdm(train, total=len(train)):
-            with autocast("cuda", dtype=torch.float16):
+            with autocast(DEVICE.type, dtype=torch.float16):
                 views = views.to(DEVICE, non_blocking=True)
                 y = y.to(DEVICE, non_blocking=True)
                 # _, proj = encoder(views)
@@ -122,11 +125,11 @@ def main():
 
     # todo list pretraining
     # [x] add checkpoints
-    # [ ] track loss across epochs to build charts loss vs epocs
+    # [ ] track loss across epochs to build charts loss vs epochs
 
     # todo list training
-    # [ ] track loss across epochs to build charts loss vs epocs
-    # [ ] track accuracy on test set over epochs to build chart accuracy vs epocs
+    # [ ] track loss across epochs to build charts loss vs epochs
+    # [ ] track accuracy on test set over epochs to build chart accuracy vs epochs
 
 
 if __name__ == "__main__":
