@@ -7,7 +7,6 @@ from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from torch.utils.data import DataLoader
 from dataset import AugmentedNyuDataset
 from meter import LeMeterEncoder, Meter
-from torch.amp import GradScaler, autocast
 from hardware_acceleration import Config, enable_hardware_acceleration
 from sigreg import SigReg
 from pathlib import Path
@@ -70,43 +69,40 @@ def pretrain_lejepa_encoder():
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         logger.warn(f"resumed from {CHECKPOINT_PATH} at epoch #{start_epoch}")
 
-    scaler = GradScaler(device=DEVICE.type, enabled=True)
     for epoch in range(start_epoch, globals.NUM_EPOCHS):
         encoder.train()  # , probe.train()
         for views, y in tqdm.tqdm(train, total=len(train)):
-            with autocast(DEVICE.type, dtype=torch.float16):
-                views = views.to(DEVICE, non_blocking=True)
-                y = y.to(DEVICE, non_blocking=True)
-                # _, proj = encoder(views)
-                _, proj, _ = encoder(views)
-                inv_loss = (proj.mean(0) - proj).square().mean()
-                sigreg_loss = sigreg(proj)
-                lejepa_loss = sigreg_loss * globals.LAMBDA + inv_loss * (
-                    1 - globals.LAMBDA
-                )
-                # y_rep, yhat = y.repeat_interleave(VIEWS), probe(emb.detach())
-                # probe_loss = TF.cross_entropy(yhat, y_rep)
-                loss = lejepa_loss  # + probe_loss
+            views = views.to(DEVICE, non_blocking=True)
+            y = y.to(DEVICE, non_blocking=True)
+            # _, proj = encoder(views)
+            _, proj, _ = encoder(views)
+
+            inv_loss = (proj.mean(0) - proj).square().mean()
+            sigreg_loss = sigreg(proj)
+            lejepa_loss = sigreg_loss * globals.LAMBDA + inv_loss * (
+                1 - globals.LAMBDA
+            )
+            # y_rep, yhat = y.repeat_interleave(VIEWS), probe(emb.detach())
+            # probe_loss = TF.cross_entropy(yhat, y_rep)
+            loss = lejepa_loss  # + probe_loss
+
+            if torch.isnan(loss):
+                logger.error(f"NaN loss detected at epoch {epoch}")
+                break
 
             opt.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.step(opt)
-            scaler.update()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=1.0)
+            opt.step()
             scheduler.step()
 
-            # logger.info(f'[{epoch}/{NUM_EPOCHS}] train/probe {probe_loss.item()}')
-            logger.info(
-                f"[{epoch}/{globals.NUM_EPOCHS}] train/lejepa {lejepa_loss.item()}"
-            )
-            logger.info(
-                f"[{epoch}/{globals.NUM_EPOCHS}] train/sigreg {sigreg_loss.item()}"
-            )
-            logger.info(
-                f"[{epoch}/{globals.NUM_EPOCHS}] train/inv_loss {inv_loss.item()}"
-            )
+            # logger.info(f'[{epoch}/{NUM_EPOCHS}] pretrain/probe {probe_loss.item()}')
+            logger.info(f"[{epoch}/{globals.NUM_EPOCHS}] pretrain/lejepa {lejepa_loss.item()}")
+            logger.info(f"[{epoch}/{globals.NUM_EPOCHS}] pretrain/sigreg {sigreg_loss.item()}")
+            logger.info(f"[{epoch}/{globals.NUM_EPOCHS}] pretrain/inv_loss {inv_loss.item()}")
 
-        history["sigreg_loss"].append(sigreg_loss)
-        history["lejepa_loss"].append(lejepa_loss)
+        history["sigreg_loss"].append(sigreg_loss.item())
+        history["lejepa_loss"].append(lejepa_loss.item())
 
         checkpoint = {
             "epoch": epoch,
@@ -116,7 +112,7 @@ def pretrain_lejepa_encoder():
 
         torch.save(checkpoint, CHECKPOINT_PATH)
 
-    with open(OUTPUT_DIR / "losses.json") as losses_file:
+    with open(OUTPUT_DIR / "losses.json", "w") as losses_file:
         json.dump(history, losses_file)
 
 
