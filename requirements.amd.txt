@@ -1,6 +1,9 @@
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.5
 aiosignal==1.4.0
+amd-torch-device-gfx12-0==2.12.0+rocm7.14.0a20260519
+amd-torch-device-gfx1200==2.12.0+rocm7.14.0a20260519
+amd-torchvision-device-gfx1200==0.27.0+rocm7.14.0a20260519
 annotated-doc==0.0.4
 annotated-types==0.7.0
 antlr4-python3-runtime==4.9.3
@@ -24,6 +27,7 @@ executing==2.2.1
 filelock==3.29.0
 fonttools==4.62.1
 frozenlist==1.8.0
+fsspec==2026.4.0
 gitdb==4.0.12
 gitpython==3.1.50
 h11==0.16.0
@@ -84,6 +88,11 @@ pyyaml==6.0.3
 pyzmq==27.1.0
 requests==2.33.1
 rich==15.0.0
+rocm==7.14.0a20260519
+rocm-bootstrap==0.1.0
+rocm-sdk-core==7.14.0a20260519
+rocm-sdk-device-gfx1200==7.14.0a20260519
+rocm-sdk-libraries==7.14.0a20260519
 safetensors==0.7.0
 scipy==1.17.1
 sentry-sdk==2.59.0
@@ -94,9 +103,9 @@ smmap==5.0.3
 stack-data==0.6.3
 sympy==1.14.0
 timm==1.0.26
-torch==2.12.0
+torch==2.12.0+rocm7.14.0a20260519
 torchmetrics==1.9.0
-torchvision==0.27.0
+torchvision==0.27.0+rocm7.14.0a20260519
 tornado==6.5.5
 tqdm==4.67.3
 traitlets==5.15.0
