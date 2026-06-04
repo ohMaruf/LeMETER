@@ -70,17 +70,6 @@ def synchronize_device(device: torch.device) -> None:
         torch.mps.synchronize()
 
 
-def load_model(device: torch.device) -> nn.Module:
-    model = Meter(device, "xxs")
-    state_dict = torch.load(
-        "meter-models/build_model_best_nyu_xxs", map_location=device
-    )
-    model.load_state_dict(state_dict)
-    model.to(device)
-    model.eval()
-    return model
-
-
 @torch.no_grad()
 def run_inference(model: nn.Module, x: Tensor) -> Tensor:
     # model produces depth in centimeters, but label is in millimeters
@@ -170,7 +159,7 @@ def main():
     dataset = NormalizedNyuDataset("test")
     device = enable_hardware_acceleration(Config.DEFAULT)
 
-    model = load_model(device)
+    model = Meter.load(device, "nyu", "xxs")
 
     benchmark_accuracy(model, dataset, device)
     benchmark_inference(model, dataset, device)
