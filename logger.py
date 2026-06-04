@@ -21,5 +21,5 @@ def warn(message: str) -> None:
     print(f"{AnsiEscapeCodes.BOLD_YELLOW}warn:{AnsiEscapeCodes.RESET} {message}", file=sys.stderr)  # noqa: E501
 
 
-def log(message: str) -> None:
+def error(message: str) -> None:
     print(f"{AnsiEscapeCodes.BOLD_RED}error:{AnsiEscapeCodes.RESET} {message}", file=sys.stderr)  # noqa: E501
