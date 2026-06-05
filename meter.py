@@ -413,7 +413,7 @@ class Meter(nn.Module):
         return x
 
     @staticmethod
-    def load(device: torch.device, dataset: Literal["nyu", "kitti"] = "nyu", arch: MeterArchitecture = "xxs") -> Meter:
+    def load(device: torch.device, dataset: Literal["nyu", "kitti"] = "nyu", arch: MeterArchitecture = "xxs") -> "Meter":
         model = Meter(device, arch)
         state_dict = torch.load(
             f"meter-models/build_model_best_{dataset}_{arch}", map_location=device
