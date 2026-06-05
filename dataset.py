@@ -8,7 +8,8 @@ from PIL import Image
 from pathlib import Path
 from torch.utils.data import Dataset
 from torch import Tensor
-from typing import Literal, cast
+from typing import Literal
+from tqdm import tqdm
 
 
 class NormalizedNyuDataset(Dataset):
@@ -93,10 +94,21 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         self,
         split: Literal["train", "test"],
         views=1,
+        caching: bool = True,
     ) -> None:
         super().__init__(split)
 
         self.views = views
+        # preload everything into RAM
+        self.caching = caching
+        if caching:
+            self.cache = [
+                (
+                    self._load_image_tensor(self._resolve_sample_path(row["image_path"])),
+                    self._load_depth_tensor(self._resolve_sample_path(row["depth_path"])),
+                )
+                for _, row in tqdm(self.samples.iterrows(), total=len(self.samples), desc="caching dataset")
+            ]
 
         self.spatial = v2.Compose([
             v2.RandomResizedCrop(
@@ -126,9 +138,12 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         )
 
     def __getitem__(self, idx):
-        sample = self.samples.iloc[idx]
-        image = self._load_image_tensor(self._resolve_sample_path(sample["image_path"]))
-        depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"]))
+        if self.caching:
+            image, depth = self.cache[idx]
+        else:
+            sample = self.samples.iloc[idx]
+            image = self._load_image_tensor(self._resolve_sample_path(sample["image_path"]))
+            depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"]))
 
         if self.views > 1:
             base = self.spatial(image)  # resize/crop once
