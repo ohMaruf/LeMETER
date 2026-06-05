@@ -35,9 +35,10 @@ def pretrain_lejepa_encoder():
         batch_size=globals.BATCH_SIZE,
         shuffle=False,
         drop_last=True,
-        num_workers=min(24, os.cpu_count() or 1),
-        prefetch_factor=2,
-        pin_memory=DEVICE.type == "cuda",
+        num_workers=min(8, os.cpu_count() or 1),
+        prefetch_factor=4,
+        pin_memory=False,
+        # pin_memory=DEVICE.type == "cuda",
         persistent_workers=True,
     )
 
