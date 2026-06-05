@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 from pathlib import Path
 
 import torch
@@ -67,14 +66,27 @@ def pretrain_lejepa_encoder():
         "lejepa_loss": [],
     }
 
+    scaler = GradScaler(enabled=(DEVICE.type == "cuda"))
+
     start_epoch = 0
     if RESUME and CHECKPOINT_PATH.exists():
         ckpt = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
         raw_encoder.load_state_dict(ckpt["model_state"])
         opt.load_state_dict(ckpt["optimizer_state"])
         scheduler.load_state_dict(ckpt["scheduler_state"])
+        scaler.load_state_dict(ckpt["scaler_state"])
+        sigreg.load_state_dict(ckpt["sigreg_state"])
         history = ckpt.get("history", history)
         start_epoch = int(ckpt.get("epoch", 0)) + 1
+
+        rng = ckpt["rng_state"]
+        torch.set_rng_state(rng["torch"])
+        if rng.get("cuda") and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(rng["cuda"])
+        if rng.get("mps") and hasattr(torch.mps, "set_rng_state"):
+            torch.mps.set_rng_state(rng["mps"])
+
+
         logger.warn(f"resumed from {CHECKPOINT_PATH} at epoch #{start_epoch}")
 
     # optimization strategies
@@ -84,8 +96,6 @@ def pretrain_lejepa_encoder():
     else:
         logger.warn(f"torch.compile is not supported/stable on {DEVICE.type}, skipping")
         encoder = raw_encoder
-
-    scaler = GradScaler(enabled=(DEVICE.type == "cuda"))
 
     for epoch in range(start_epoch, globals.NUM_EPOCHS):
         encoder.train()  # , probe.train()
@@ -134,10 +144,20 @@ def pretrain_lejepa_encoder():
             "model_state": raw_encoder.state_dict(),
             "optimizer_state": opt.state_dict(),
             "scheduler_state": scheduler.state_dict(),
+            "scaler_state": scaler.state_dict() if scaler.is_enabled() else None,
+            "sigreg_state": sigreg.state_dict(),
             "history": history,
+            "rng_state": {
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                "mps": torch.mps.get_rng_state() if torch.backends.mps.is_available() else None,
+            },
         }
 
-        torch.save(checkpoint, CHECKPOINT_PATH)
+        # to avoid risk of corrupting the previous checkpoint file
+        temp_path = CHECKPOINT_PATH.with_suffix(".tmp")
+        torch.save(checkpoint, temp_path)
+        temp_path.replace(CHECKPOINT_PATH)
 
     with open(OUTPUT_DIR / "losses.json", "w") as losses_file:
         json.dump(history, losses_file)
