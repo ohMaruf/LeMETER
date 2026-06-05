@@ -42,19 +42,9 @@ class NormalizedNyuDataset(Dataset):
             )
 
         if split == "test":
-            return cast(
-                pd.DataFrame,
-                pd.read_csv(
-                    test_manifest_path, names=["image_path", "depth_path"], header=None
-                ),
-            )
+            return pd.read_csv(test_manifest_path, names=["image_path", "depth_path"], header=None)
 
-        return cast(
-            pd.DataFrame,
-            pd.read_csv(
-                train_manifest_path, names=["image_path", "depth_path"], header=None
-            ),
-        )
+        return pd.read_csv(train_manifest_path, names=["image_path", "depth_path"], header=None)
 
     def _load_normalization_stats(self) -> tuple[tuple[float, ...], tuple[float, ...]]:
         stats_path = self.root / self.stats_rel
@@ -107,22 +97,24 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         super().__init__(split)
 
         self.views = views
-        self.augmentation = v2.Compose(
-            [
-                v2.RandomResizedCrop(
-                    size=(INPUT_RESOLUTION[0] // 2, INPUT_RESOLUTION[1] // 2),
-                ),
-                v2.Resize(INPUT_RESOLUTION),
-                v2.RandomApply([v2.ColorJitter(0.8, 0.8, 0.8, 0.2)], p=0.8),
-                v2.RandomGrayscale(p=0.2),
-                v2.RandomApply([v2.GaussianBlur(kernel_size=7, sigma=(0.1, 2.0))]),  # noqa: E501
-                v2.RandomApply([v2.RandomSolarize(threshold=0.5)], p=0.2),
-                v2.RandomHorizontalFlip(),
-                v2.ToImage(),
-                v2.ToDtype(FLOATING_PRECISION, scale=True),
-                self.zscore_normalize,
-            ]
-        )
+
+        self.spatial = v2.Compose([
+            v2.RandomResizedCrop(
+                size=(INPUT_RESOLUTION[0] // 2, INPUT_RESOLUTION[1] // 2),
+            ),
+            v2.Resize(INPUT_RESOLUTION),
+            v2.RandomHorizontalFlip(),
+            v2.ToImage(),
+            v2.ToDtype(FLOATING_PRECISION, scale=True),
+        ])
+
+        self.appearance = v2.Compose([
+            v2.RandomApply([v2.ColorJitter(0.8, 0.8, 0.8, 0.2)], p=0.8),
+            v2.RandomGrayscale(p=0.2),
+            v2.RandomApply([v2.GaussianBlur(kernel_size=7, sigma=(0.1, 2.0))]),
+            v2.RandomApply([v2.RandomSolarize(threshold=0.5)], p=0.2),
+            self.zscore_normalize,
+        ])
 
         self.test = v2.Compose(
             [
@@ -137,5 +129,11 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         sample = self.samples.iloc[idx]
         image = self._load_image_tensor(self._resolve_sample_path(sample["image_path"]))
         depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"]))
-        transform = self.augmentation if self.views > 1 else self.test
-        return torch.stack([transform(image) for _ in range(self.views)]), depth  # noqa: E501
+
+        if self.views > 1:
+            base = self.spatial(image)  # resize/crop once
+            views = torch.stack([self.appearance(base) for _ in range(self.views)])
+        else:
+            views = self.test(image)
+
+        return views, depth
