@@ -33,9 +33,10 @@ def pretrain_lejepa_encoder():
     train = DataLoader(
         train_ds,
         batch_size=globals.BATCH_SIZE,
-        shuffle=True,
+        shuffle=False,
         drop_last=True,
-        num_workers=min(8, os.cpu_count() or 1),
+        num_workers=min(24, os.cpu_count() or 1),
+        prefetch_factor=2,
         pin_memory=DEVICE.type == "cuda",
         persistent_workers=True,
     )
@@ -111,7 +112,8 @@ def pretrain_lejepa_encoder():
                 # _, proj = encoder(views)
                 _, proj, _ = encoder(views)
 
-                inv_loss = (proj.mean(0) - proj).square().mean()
+                proj_mean = proj.mean(0)
+                inv_loss = (proj_mean - proj).square().mean()
                 sigreg_loss = sigreg(proj)
                 lejepa_loss = sigreg_loss * globals.LAMBDA + inv_loss * (1 - globals.LAMBDA)
                 # y_rep, yhat = y.repeat_interleave(VIEWS), probe(emb.detach())
