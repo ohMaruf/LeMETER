@@ -1,0 +1,8 @@
+--index-url https://download.pytorch.org/whl/cu132
+torch
+torchvision
+pandas
+kagglehub
+pillow
+psutil
+einops
