@@ -92,8 +92,7 @@ def pretrain_lejepa_encoder():
 
         epoch_sigreg = 0.0
         epoch_lejepa = 0.0
-        for views, y in tqdm(train, total=len(train), file=sys.stderr):
-            print("", file=sys.stderr, flush=True)
+        for views, y in tqdm(train, total=len(train), position=0, leave=True):
             opt.zero_grad(set_to_none=True)
 
             with torch.autocast(DEVICE.type, dtype=torch.bfloat16): # bfloat16 is numerically more stable than float16
@@ -123,11 +122,9 @@ def pretrain_lejepa_encoder():
             scaler.update()
             scheduler.step()
 
-            # logger.info(f'[{epoch}/{NUM_EPOCHS}] pretrain/probe {probe_loss.item()}')
-            logger.info(f"[{epoch}/{globals.NUM_EPOCHS}] pretrain/lejepa {lejepa_loss.item()}")
-            logger.info(f"[{epoch}/{globals.NUM_EPOCHS}] pretrain/sigreg {sigreg_loss.item()}")
-            logger.info(f"[{epoch}/{globals.NUM_EPOCHS}] pretrain/inv_loss {inv_loss.item()}")
 
+        logger.info(f"[{epoch}/{globals.NUM_EPOCHS}] pretrain/lejepa {epoch_lejepa / len(train)}")
+        logger.info(f"[{epoch}/{globals.NUM_EPOCHS}] pretrain/sigreg {epoch_sigreg / len(train)}")
 
         history["sigreg_loss"].append(epoch_sigreg / len(train))
         history["lejepa_loss"].append(epoch_lejepa / len(train))
