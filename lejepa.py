@@ -81,11 +81,11 @@ def pretrain_lejepa_encoder():
         start_epoch = int(ckpt.get("epoch", 0)) + 1
 
         rng = ckpt["rng_state"]
-        torch.set_rng_state(rng["torch"])
+        torch.set_rng_state(rng["torch"].cpu())
         if rng.get("cuda") and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(rng["cuda"])
+            torch.cuda.set_rng_state_all([t.cpu() for t in rng["cuda"]])
         if rng.get("mps") and hasattr(torch.mps, "set_rng_state"):
-            torch.mps.set_rng_state(rng["mps"])
+            torch.mps.set_rng_state(rng["mps"].cpu())
 
 
         logger.warn(f"resumed from {CHECKPOINT_PATH} at epoch #{start_epoch}")
