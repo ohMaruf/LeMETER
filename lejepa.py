@@ -1,9 +1,10 @@
 import json
 import os
+import sys
 from pathlib import Path
 
 import torch
-import tqdm
+from tqdm import tqdm
 from torch import GradScaler
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from torch.utils.data import DataLoader
@@ -91,7 +92,8 @@ def pretrain_lejepa_encoder():
 
         epoch_sigreg = 0.0
         epoch_lejepa = 0.0
-        for views, y in tqdm.tqdm(train, total=len(train)):
+        for views, y in tqdm(train, total=len(train), file=sys.stderr):
+            print("", file=sys.stderr, flush=True)
             opt.zero_grad(set_to_none=True)
 
             with torch.autocast(DEVICE.type, dtype=torch.bfloat16): # bfloat16 is numerically more stable than float16
