@@ -19,9 +19,17 @@ NYU_TEST_CSV = NYU_DATASET_ROOT / Path("data/nyu2_test.csv")
 NYU_PREPROCESSED_ROOT = Path("preprocessed_datasets/nyu-depth-v2")
 NYU_COMPLETE_MARKER = Path("preprocessed_datasets/.complete") / NYU_DATASET_NAME
 NYU_STATS_PATH = NYU_PREPROCESSED_ROOT / "stats.json"
-NYU_WORKER_COUNT = min(8, os.cpu_count() or 1)
+NYU_WORKER_COUNT = os.cpu_count() or 1
 NYU_CHUNK_SIZE = 256
 ManifestRow = tuple[str, str]
+
+_DIR_CACHE: set[Path] = set()
+
+
+def _ensure_dir(path: Path) -> None:
+    if path not in _DIR_CACHE:
+        path.mkdir(parents=True, exist_ok=True)
+        _DIR_CACHE.add(path)
 
 
 class ChannelStats:
@@ -31,9 +39,11 @@ class ChannelStats:
         self.pixel_count = 0
 
     def update(self, image: torch.Tensor) -> None:
-        image = image.detach().to("cpu", dtype=torch.float64) / 255.0
-        self.sum += image.sum(dim=(1, 2))
-        self.sum_sq += image.square().sum(dim=(1, 2))
+        image = image.detach()
+        self.sum += torch.sum(image, dim=(1, 2), dtype=torch.float64) / 255.0
+        self.sum_sq += (
+            torch.sum(image.to(torch.float64).square(), dim=(1, 2)) / (255.0**2)
+        )
         self.pixel_count += image.shape[1] * image.shape[2]
 
     def as_dict(self) -> dict[str, object]:
@@ -72,14 +82,13 @@ class ChannelStats:
 
 
 def copy_with_parents(source_path: Path, destination_path: Path) -> None:
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_dir(destination_path.parent)
     shutil.copy2(source_path, destination_path)
 
 
 def save_image_tensor(image: torch.Tensor, destination_path: Path) -> None:
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    image = image.to("cpu", dtype=torch.float32)
-    image = image.clamp(0, 255).round().to(torch.uint8)
+    _ensure_dir(destination_path.parent)
+    image = image.detach().clamp(0, 255).round().to(torch.uint8)
     pil_image = to_pil_image(image, mode="RGB")
     if destination_path.suffix.lower() in {".jpg", ".jpeg"}:
         pil_image.save(destination_path, quality=100)
@@ -132,16 +141,18 @@ def preprocess_nyu_pair(
 
         resized = rgb_image.resize(
             (INPUT_RESOLUTION[1], INPUT_RESOLUTION[0]),
-            # resample=Image.Resampling.LANCZOS,
             resample=Image.Resampling.BICUBIC,
         )
 
-        resized_tensor = to_tensor(resized) * 255
+        _ensure_dir(target_image_path.parent)
+        if target_image_path.suffix.lower() in {".jpg", ".jpeg"}:
+            resized.save(target_image_path, quality=100)
+        elif target_image_path.suffix.lower() == ".png":
+            resized.save(target_image_path)
+        else:
+            raise ValueError(f"Unsupported image format: {target_image_path.suffix}")
 
-        save_image_tensor(
-            resized_tensor,
-            target_image_path,
-        )
+        resized_tensor = to_tensor(resized) * 255
     copy_with_parents(source_depth_path, target_depth_path)
     return resized_tensor
 
@@ -151,6 +162,7 @@ def preprocess_nyu_chunk(
     *,
     collect_stats: bool,
 ) -> dict[str, object]:
+    torch.set_num_threads(1)
     stats = ChannelStats()
     for image_rel_path, depth_rel_path in rows:
         resized = preprocess_nyu_pair(image_rel_path, depth_rel_path)
