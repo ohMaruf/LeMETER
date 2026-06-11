@@ -139,18 +139,18 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
     def __getitem__(self, index):
         sample = self.samples.iloc[index]
         image = self._load_image_tensor_uint8(self._resolve_sample_path(sample["image_path"]))
-        depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"]))
+
+        # depth is intentionally not loaded: SSL pretraining never uses it, and
+        # decoding the full-res PNG per sample wastes worker CPU and queue RAM
 
         if self.views > 1:
             # each view gets its own crop: spatial invariance is the main
             # signal LeJEPA learns from, photometric jitter alone is too weak
-            views = torch.stack([
+            return torch.stack([
                 self.appearance(self.spatial(image)) for _ in range(self.views)
             ])
-        else:
-            views = self.test(image)
 
-        return views, depth
+        return self.test(image)
 
 
 
