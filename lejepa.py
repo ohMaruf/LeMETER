@@ -46,8 +46,10 @@ def pretrain_lejepa_encoder():
         batch_size=globals.BATCH_SIZE,
         shuffle=True,
         drop_last=True,
-        num_workers=min(8, os.cpu_count() or 1),
-        prefetch_factor=4,
+        num_workers=min(globals.DATALOADER_WORKERS, os.cpu_count() or 1),
+        # RAM in queues = workers x prefetch x ~290 MiB per batch; 24 x 2 is
+        # ~13.5 GiB, comfortable on the 32 GiB box
+        prefetch_factor=2,
         pin_memory=False,
         # disabled because it performs worse on our training machine when set to True
         # pin_memory=DEVICE.type == "cuda",
@@ -124,7 +126,7 @@ def pretrain_lejepa_encoder():
         epoch_inv = 0.0
         epoch_lejepa = 0.0
         epoch_grad_norm = 0.0
-        for views, y in tqdm(train, total=len(train), position=0, leave=True):
+        for views in tqdm(train, total=len(train), position=0, leave=True):
             opt.zero_grad(set_to_none=True)
 
             with torch.autocast(DEVICE.type, dtype=torch.bfloat16): # bfloat16 is numerically more stable than float16

@@ -19,6 +19,11 @@ INPUT_RESOLUTION = (192, 256)  # height, width (rows x columns notation)
 
 SEED = 3407
 
+# the training box has 32 cores; augmentation (8 views per sample) is the
+# pipeline bottleneck, so most of them should feed the DataLoader. RAM cost is
+# workers x prefetch_factor x batch size (~290 MiB for a pretraining batch).
+DATALOADER_WORKERS = 24
+
 FLOATING_PRECISION = torch.float32
 NUM_SLICES = 256
 PROJ_DIM = 128
