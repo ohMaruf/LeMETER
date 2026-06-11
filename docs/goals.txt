@@ -1,0 +1,16 @@
+Dataset: NYU Depth V2, KITTI.
+Task: Comparative study of a lightweight MDE architecture (METER/MobileViT) pre-trained with LeJEPA vs.
+ImageNet-Supervised pre-training, focusing on depth accuracy and feature interpretability.
+Main objectives:
+• Lightweight LeJEPA Integration: Implement the LeJEPA training objective (SIGReg) on a mobile-friendly
+backbone (e.g., the ViT-lite used in METER). The goal is to perform self-supervised pre-training on static
+images with minimal computational resources (single GPU).
+• Zero-shot Geometric Probing: Before adding the depth decoder, analyze the latent space using PCA. Evaluate
+if the ”free” semantic segments emerging from LeJEPA align with depth discontinuities (e.g., if the PCA
+map naturally separates foreground objects from the background).
+• MDE Downstream Performance: Fine-tune the LeJEPA-METER model for depth estimation. Compare the
+results against the original supervised METER in terms of RMSE, AbsRel, and δ1 metrics, verifying if SSL
+pre-training speeds up convergence.
+• Efficiency-Accuracy Trade-off: Quantify the performance gains relative to the training cost. Analyze if
+LeJEPA’s ”heuristics-free” approach (no teacher-student, no stop-gradient) makes it more suitable for stu-
+dents to adapt MDE models to specific robotic domains with limited data.
