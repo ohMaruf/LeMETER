@@ -1,5 +1,6 @@
 import json
 import torch
+import torch.nn.functional as F
 import pandas as pd
 from globals import FLOATING_PRECISION, INPUT_RESOLUTION, TRAIN_DEPTH_TO_CM, OUTPUT_RESOLUTION
 from torchvision.transforms import v2
@@ -169,5 +170,5 @@ class DepthTrainDataset(NormalizedNyuDataset):
             image = torch.flip(image, dims=[-1])
             depth = torch.flip(depth, dims=[-1])
 
-        depth = TF.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)
+        depth = F.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)
         return {"image": image, "depth": depth}
