@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 
 import torch
@@ -18,26 +19,37 @@ from sigreg import SigReg
 OUTPUT_DIR = Path("runs/lemeter")
 CHECKPOINT_PATH = OUTPUT_DIR / "last_checkpoint.pt"
 
+# periodic encoder snapshots, so we can later chart how the latent space (PCA
+# probing) and the downstream decoder performance evolve with pretraining length
+SNAPSHOT_EVERY = 10
+
 
 def pretrain_lejepa_encoder():
     RESUME = True
+    torch.manual_seed(globals.SEED)
     DEVICE = enable_hardware_acceleration(Config.DEFAULT)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    meter = Meter.load(DEVICE, "nyu", "xxs")
-    meter.train()
+    # random initialization: starting from the depth-supervised METER weights
+    # would contaminate the SSL-vs-supervised comparison, since the encoder
+    # would already contain depth-task information before LeJEPA runs
+    meter = Meter(DEVICE, "xxs")
 
     raw_encoder = LeMeterEncoder(DEVICE, meter.encoder).to(DEVICE)
     train_ds = AugmentedNyuDataset("train", globals.VIEWS)
+    # shuffle is required: the manifest is grouped by scene (~178 frames per
+    # scene), so without it every batch holds near-duplicate frames and the
+    # SIGReg batch statistic degenerates
     train = DataLoader(
         train_ds,
         batch_size=globals.BATCH_SIZE,
-        shuffle=False,
+        shuffle=True,
         drop_last=True,
         num_workers=min(8, os.cpu_count() or 1),
         prefetch_factor=4,
         pin_memory=False,
+        # disabled because it performs worse on our training machine when set to True
         # pin_memory=DEVICE.type == "cuda",
         persistent_workers=True,
     )
@@ -54,9 +66,9 @@ def pretrain_lejepa_encoder():
     # opt = torch.optim.AdamW([g1, g2])
     opt = torch.optim.AdamW([g1])
     warmup_steps = len(train)
-    total_steps = len(train) * globals.NUM_EPOCHS
+    total_steps = len(train) * globals.PRETRAIN_EPOCHS
     s1 = LinearLR(opt, start_factor=0.01, total_iters=warmup_steps)
-    s2 = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps, eta_min=1e-3)
+    s2 = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps, eta_min=globals.LEARNING_RATE * 1e-2)
     scheduler = SequentialLR(
         opt,
         schedulers=[s1, s2],
@@ -65,7 +77,11 @@ def pretrain_lejepa_encoder():
 
     history = {
         "sigreg_loss": [],
+        "inv_loss": [],
         "lejepa_loss": [],
+        "lr": [],
+        "grad_norm": [],
+        "epoch_seconds": [],
     }
 
     scaler = GradScaler(enabled=(DEVICE.type == "cuda"))
@@ -78,7 +94,8 @@ def pretrain_lejepa_encoder():
         scheduler.load_state_dict(ckpt["scheduler_state"])
         scaler.load_state_dict(ckpt["scaler_state"])
         sigreg.load_state_dict(ckpt["sigreg_state"])
-        history = ckpt.get("history", history)
+        # keep defaults for series that older checkpoints did not track
+        history = {**history, **ckpt.get("history", {})}
         start_epoch = int(ckpt.get("epoch", 0)) + 1
 
         rng = ckpt["rng_state"]
@@ -99,11 +116,14 @@ def pretrain_lejepa_encoder():
         logger.warn(f"torch.compile is not supported/stable on {DEVICE.type}, skipping")
         encoder = raw_encoder
 
-    for epoch in range(start_epoch, globals.NUM_EPOCHS):
+    for epoch in range(start_epoch, globals.PRETRAIN_EPOCHS):
         encoder.train()  # , probe.train()
 
+        epoch_start = time.time()
         epoch_sigreg = 0.0
+        epoch_inv = 0.0
         epoch_lejepa = 0.0
+        epoch_grad_norm = 0.0
         for views, y in tqdm(train, total=len(train), position=0, leave=True):
             opt.zero_grad(set_to_none=True)
 
@@ -126,21 +146,27 @@ def pretrain_lejepa_encoder():
                     raise RuntimeError(msg)
 
             epoch_sigreg += sigreg_loss.item()
+            epoch_inv += inv_loss.item()
             epoch_lejepa += lejepa_loss.item()
 
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(raw_encoder.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(raw_encoder.parameters(), max_norm=1.0)
+            epoch_grad_norm += grad_norm.item()
             scaler.step(opt)
             scaler.update()
             scheduler.step()
 
 
-        logger.info(f"[{epoch}/{globals.NUM_EPOCHS}] pretrain/lejepa {epoch_lejepa / len(train)}")
-        logger.info(f"[{epoch}/{globals.NUM_EPOCHS}] pretrain/sigreg {epoch_sigreg / len(train)}")
+        logger.info(f"[{epoch}/{globals.PRETRAIN_EPOCHS}] pretrain/lejepa {epoch_lejepa / len(train)}")
+        logger.info(f"[{epoch}/{globals.PRETRAIN_EPOCHS}] pretrain/sigreg {epoch_sigreg / len(train)}")
 
         history["sigreg_loss"].append(epoch_sigreg / len(train))
+        history["inv_loss"].append(epoch_inv / len(train))
         history["lejepa_loss"].append(epoch_lejepa / len(train))
+        history["lr"].append(scheduler.get_last_lr()[0])
+        history["grad_norm"].append(epoch_grad_norm / len(train))
+        history["epoch_seconds"].append(time.time() - epoch_start)
 
         checkpoint = {
             "epoch": epoch,
@@ -162,8 +188,14 @@ def pretrain_lejepa_encoder():
         torch.save(checkpoint, temp_path)
         temp_path.replace(CHECKPOINT_PATH)
 
-    with open(OUTPUT_DIR / "losses.json", "w") as losses_file:
-        json.dump(history, losses_file)
+        if (epoch + 1) % SNAPSHOT_EVERY == 0 or epoch + 1 == globals.PRETRAIN_EPOCHS:
+            snapshot_path = OUTPUT_DIR / f"encoder_epoch_{epoch + 1:03d}.pt"
+            torch.save({"epoch": epoch, "model_state": raw_encoder.state_dict()}, snapshot_path)
+            logger.info(f"saved encoder snapshot to {snapshot_path}")
+
+        # dumped every epoch so a crash never loses the chart data
+        with open(OUTPUT_DIR / "losses.json", "w") as losses_file:
+            json.dump(history, losses_file)
 
 
 def main():
