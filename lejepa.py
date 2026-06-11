@@ -16,7 +16,7 @@ from hardware_acceleration import Config, enable_hardware_acceleration
 from meter import LeMeterEncoder, Meter
 from sigreg import SigReg
 
-OUTPUT_DIR = Path("runs/lemeter")
+OUTPUT_DIR = Path("runs/pretrain_encoder")
 CHECKPOINT_PATH = OUTPUT_DIR / "last_checkpoint.pt"
 
 # periodic encoder snapshots, so we can later chart how the latent space (PCA
