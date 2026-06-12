@@ -155,20 +155,45 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
 
 
 class DepthTrainDataset(NormalizedNyuDataset):
-    """Correctly-scaled image + depth target at decoder resolution, in cm."""
+    """Image + depth target at decoder resolution, in cm, with the original
+    METER training augmentation (see augmentation.py): mirror, gamma /
+    brightness / color jitter on the 0-255 scale, and the depth-shift strategy.
+    """
+
+    MIRROR_P = 0.9
+    SHIFT_STRATEGY_P = 0.9
 
     def __init__(self, split, augment: bool):
         super().__init__(split)
         self.augment = augment
 
-    def __getitem__(self, index):
-        item = super().__getitem__(index)
-        image = item["image"]
-        depth = item["depth"] * TRAIN_DEPTH_TO_CM
-
-        if self.augment and torch.rand(()) < 0.5:
+    def _augment(self, image: Tensor, depth_cm: Tensor) -> tuple[Tensor, Tensor]:
+        """image in [0, 255] float CHW, depth in centimeters."""
+        if torch.rand(()) < self.MIRROR_P:
             image = torch.flip(image, dims=[-1])
-            depth = torch.flip(depth, dims=[-1])
+            depth_cm = torch.flip(depth_cm, dims=[-1])
 
+        if torch.rand(()) < self.SHIFT_STRATEGY_P:
+            # METER applies gamma and brightness on the 0-255 scale, then clips
+            gamma = float(torch.empty(()).uniform_(0.9, 1.1))
+            image = image.pow(gamma)
+            brightness = float(torch.empty(()).uniform_(0.9, 1.1))
+            colors = torch.empty(3, 1, 1).uniform_(0.9, 1.1)
+            image = (image * brightness * colors).clamp(0.0, 255.0)
+
+            shift_cm = float(torch.randint(-10, 11, ()))
+            depth_cm = (depth_cm + shift_cm).clamp_min(0.0)
+
+        return image, depth_cm
+
+    def __getitem__(self, index):
+        sample = self.samples.iloc[index]
+        image = self._load_image_tensor(self._resolve_sample_path(sample["image_path"]))
+        depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"])) * TRAIN_DEPTH_TO_CM
+
+        if self.augment:
+            image, depth = self._augment(image, depth)
+
+        image = self._normalize_image(image)
         depth = F.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)
         return {"image": image, "depth": depth}
