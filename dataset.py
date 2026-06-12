@@ -17,7 +17,10 @@ from PIL import Image
 from pathlib import Path
 from torch.utils.data import Dataset
 from torch import Tensor
+from tqdm import tqdm
 from typing import Literal
+
+import logger
 
 
 def meter_photometric_jitter(image: Tensor) -> Tensor:
@@ -123,6 +126,9 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
 
         self.views = views
         self.augmentation = augmentation
+        # scalar target for the online depth probe: flip-invariant and cached,
+        # so depth PNG decoding stays out of the training workers
+        self.mean_depth_cm = self._load_mean_depth_cache(split)
 
         if augmentation == "lejepa":
             # operates on uint8 [0, 255]; ToDtype(scale=True) only rescales on
@@ -173,6 +179,25 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
             ]
         )
 
+    def _load_mean_depth_cache(self, split: Literal["train", "test"]) -> Tensor:
+        """Per-image mean depth in cm, aligned with the manifest order.
+        Built once, then loaded from disk."""
+        cache_path = self.root / f"mean_depth_cm_{split}.pt"
+        if cache_path.exists():
+            return torch.load(cache_path)
+
+        logger.info(f"building mean-depth cache for split '{split}' (one-time)")
+        # train depth PNGs are uint8 (255 == 10 m), test PNGs are uint16 mm
+        scale = TRAIN_DEPTH_TO_CM if split == "train" else 0.1
+        means = torch.empty(len(self.samples))
+        for index in tqdm(range(len(self.samples)), desc="mean depth"):
+            depth_path = self._resolve_sample_path(self.samples.iloc[index]["depth_path"])
+            means[index] = self._load_depth_tensor(depth_path).mean() * scale
+
+        torch.save(means, cache_path)
+        logger.info(f"wrote {cache_path}")
+        return means
+
     def _make_view(self, image: Tensor) -> Tensor:
         if self.augmentation == "lejepa":
             return self.appearance(self.spatial(image))
@@ -186,15 +211,16 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         sample = self.samples.iloc[index]
         image = self._load_image_tensor_uint8(self._resolve_sample_path(sample["image_path"]))
 
-        # depth is intentionally not loaded: SSL pretraining never uses it, and
-        # decoding the full-res PNG per sample wastes worker CPU and queue RAM
+        # the full depth map stays out of the workers (PNG decode + queue RAM);
+        # the online probe only needs the cached per-image mean depth
+        mean_depth_cm = self.mean_depth_cm[index]
 
         if self.views > 1:
             # each view gets its own crop: spatial invariance is the main
             # signal LeJEPA learns from, photometric jitter alone is too weak
-            return torch.stack([self._make_view(image) for _ in range(self.views)])
+            return torch.stack([self._make_view(image) for _ in range(self.views)]), mean_depth_cm
 
-        return self.test(image)
+        return self.test(image), mean_depth_cm
 
 
 

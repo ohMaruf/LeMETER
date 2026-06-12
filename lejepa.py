@@ -4,6 +4,8 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 from torch import GradScaler
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
@@ -56,7 +58,15 @@ def pretrain_lejepa_encoder():
         persistent_workers=True,
     )
 
-    # probe = nn.Sequential(nn.LayerNorm(EMBEDDING_DIM), nn.Linear(EMBEDDING_DIM, 1)).to(DEVICE)
+    # nonlinear diagnostic probe: regresses the (normalized) mean scene depth
+    # from the detached embedding. It never influences the encoder; its
+    # per-epoch R2 tracks how much depth information the embedding carries.
+    probe = nn.Sequential(
+        nn.LayerNorm(globals.EMBEDDING_DIM),
+        nn.Linear(globals.EMBEDDING_DIM, globals.EMBEDDING_DIM),
+        nn.GELU(),
+        nn.Linear(globals.EMBEDDING_DIM, 1),
+    ).to(DEVICE)
     sigreg = SigReg().to(DEVICE)
 
     g1 = {
@@ -64,9 +74,8 @@ def pretrain_lejepa_encoder():
         "lr": globals.LEARNING_RATE,
         "weight_decay": 5e-2,
     }
-    # g2 = {"params": probe.parameters(), "lr": 1e-3, "weight_decay": 1e-7}
-    # opt = torch.optim.AdamW([g1, g2])
-    opt = torch.optim.AdamW([g1])
+    g2 = {"params": probe.parameters(), "lr": 1e-3, "weight_decay": 1e-7}
+    opt = torch.optim.AdamW([g1, g2])
     warmup_steps = len(train)
     total_steps = len(train) * globals.PRETRAIN_EPOCHS
     s1 = LinearLR(opt, start_factor=0.01, total_iters=warmup_steps)
@@ -81,6 +90,7 @@ def pretrain_lejepa_encoder():
         "sigreg_loss": [],
         "inv_loss": [],
         "lejepa_loss": [],
+        "probe_r2": [],
         "lr": [],
         "grad_norm": [],
         "epoch_seconds": [],
@@ -96,6 +106,7 @@ def pretrain_lejepa_encoder():
         scheduler.load_state_dict(ckpt["scheduler_state"])
         scaler.load_state_dict(ckpt["scaler_state"])
         sigreg.load_state_dict(ckpt["sigreg_state"])
+        probe.load_state_dict(ckpt["probe_state"])
         # keep defaults for series that older checkpoints did not track
         history = {**history, **ckpt.get("history", {})}
         start_epoch = int(ckpt.get("epoch", 0)) + 1
@@ -119,37 +130,49 @@ def pretrain_lejepa_encoder():
         encoder = raw_encoder
 
     for epoch in range(start_epoch, globals.PRETRAIN_EPOCHS):
-        encoder.train()  # , probe.train()
+        encoder.train(), probe.train()
 
         epoch_start = time.time()
         epoch_sigreg = 0.0
         epoch_inv = 0.0
         epoch_lejepa = 0.0
         epoch_grad_norm = 0.0
-        for views in tqdm(train, total=len(train), position=0, leave=True):
+        probe_ss_res = 0.0
+        probe_y_sum = 0.0
+        probe_y_sq = 0.0
+        probe_count = 0
+        for views, y in tqdm(train, total=len(train), position=0, leave=True):
             opt.zero_grad(set_to_none=True)
 
             with torch.autocast(DEVICE.type, dtype=torch.bfloat16): # bfloat16 is numerically more stable than float16
                 views = views.to(DEVICE, non_blocking=True)
-                # y = y.to(DEVICE, non_blocking=True)
-                # _, proj = encoder(views)
-                _, proj, _ = encoder(views)
+                emb, proj, _ = encoder(views)
 
                 proj_mean = proj.mean(0)
                 inv_loss = (proj_mean - proj).square().mean()
                 sigreg_loss = sigreg(proj)
                 lejepa_loss = sigreg_loss * globals.LAMBDA + inv_loss * (1 - globals.LAMBDA)
-                # y_rep, yhat = y.repeat_interleave(VIEWS), probe(emb.detach())
-                # probe_loss = TF.cross_entropy(yhat, y_rep)
-                loss = lejepa_loss  # + probe_loss
-                if not torch.isfinite(loss):
-                    msg = f"Invalid loss {loss.item()} at epoch {epoch}"
-                    logger.error(msg)
-                    raise RuntimeError(msg)
+
+            # probe in fp32, on detached embeddings: gradients flow only into
+            # the probe head, and the target is mean depth normalized by the
+            # 10 m (1000 cm) range
+            y_rep = y.to(DEVICE, non_blocking=True).float().repeat_interleave(globals.VIEWS) / 1000.0
+            yhat = probe(emb.detach().float()).squeeze(-1)
+            probe_loss = F.mse_loss(yhat, y_rep)
+
+            loss = lejepa_loss + probe_loss
+            if not torch.isfinite(loss):
+                msg = f"Invalid loss {loss.item()} at epoch {epoch}"
+                logger.error(msg)
+                raise RuntimeError(msg)
 
             epoch_sigreg += sigreg_loss.item()
             epoch_inv += inv_loss.item()
             epoch_lejepa += lejepa_loss.item()
+            probe_ss_res += (yhat - y_rep).detach().square().sum().item()
+            probe_y_sum += y_rep.sum().item()
+            probe_y_sq += y_rep.square().sum().item()
+            probe_count += y_rep.numel()
 
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -160,12 +183,18 @@ def pretrain_lejepa_encoder():
             scheduler.step()
 
 
+        # streaming R2 over the epoch: 1 - SS_res / SS_tot
+        probe_ss_tot = probe_y_sq - probe_y_sum**2 / max(probe_count, 1)
+        probe_r2 = 1.0 - probe_ss_res / max(probe_ss_tot, 1e-12)
+
         logger.info(f"[{epoch}/{globals.PRETRAIN_EPOCHS}] pretrain/lejepa {epoch_lejepa / len(train)}")
         logger.info(f"[{epoch}/{globals.PRETRAIN_EPOCHS}] pretrain/sigreg {epoch_sigreg / len(train)}")
+        logger.info(f"[{epoch}/{globals.PRETRAIN_EPOCHS}] pretrain/probe_r2 {probe_r2:.4f}")
 
         history["sigreg_loss"].append(epoch_sigreg / len(train))
         history["inv_loss"].append(epoch_inv / len(train))
         history["lejepa_loss"].append(epoch_lejepa / len(train))
+        history["probe_r2"].append(probe_r2)
         history["lr"].append(scheduler.get_last_lr()[0])
         history["grad_norm"].append(epoch_grad_norm / len(train))
         history["epoch_seconds"].append(time.time() - epoch_start)
@@ -177,6 +206,7 @@ def pretrain_lejepa_encoder():
             "scheduler_state": scheduler.state_dict(),
             "scaler_state": scaler.state_dict() if scaler.is_enabled() else None,
             "sigreg_state": sigreg.state_dict(),
+            "probe_state": probe.state_dict(),
             "history": history,
             "rng_state": {
                 "torch": torch.get_rng_state(),
