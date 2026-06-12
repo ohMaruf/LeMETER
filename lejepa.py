@@ -23,7 +23,7 @@ CHECKPOINT_PATH = OUTPUT_DIR / "last_checkpoint.pt"
 
 # periodic encoder snapshots, so we can later chart how the latent space (PCA
 # probing) and the downstream decoder performance evolve with pretraining length
-SNAPSHOT_EVERY = 10
+SNAPSHOT_EVERY = 5
 
 
 def pretrain_lejepa_encoder():
