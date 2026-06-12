@@ -6,3 +6,4 @@ kagglehub
 pillow
 psutil
 einops
+matplotlib
