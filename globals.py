@@ -33,7 +33,7 @@ LEARNING_RATE = 1e-3
 # pretraining starts from a random encoder, so it needs a full schedule
 # (original METER was trained for 60 epochs); the decoder alone converges faster
 PRETRAIN_EPOCHS = 60
-DECODER_EPOCHS = 20
+DECODER_EPOCHS = 40
 LAMBDA = 5e-2
 VIEWS = 8
 
