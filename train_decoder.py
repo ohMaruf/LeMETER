@@ -190,12 +190,16 @@ def train_decoder():
                 x = batch["image"].to(DEVICE, non_blocking=True)
                 y = batch["depth"].to(DEVICE, non_blocking=True)
                 z = compiled_model(x)
-                loss_depth, loss_ssim, loss_normal, loss_grad = loss_fn(z, y)
-                loss = loss_depth + loss_ssim + loss_normal + loss_grad
-                if not torch.isfinite(loss):
-                    msg = f"Invalid loss {loss.item()} at epoch {epoch}"
-                    logger.error(msg)
-                    raise RuntimeError(msg)
+
+            # loss in fp32, outside autocast: ssim computes E[x^2] - mu^2 at
+            # centimeter scale (~1e5), which cancels catastrophically in bf16
+            # and can hit a zero denominator -> (1 - inf) * 100 = -inf
+            loss_depth, loss_ssim, loss_normal, loss_grad = loss_fn(z.float(), y)
+            loss = loss_depth + loss_ssim + loss_normal + loss_grad
+            if not torch.isfinite(loss):
+                msg = f"Invalid loss {loss.item()} at epoch {epoch}"
+                logger.error(msg)
+                raise RuntimeError(msg)
 
             epoch_loss += loss.item()
             epoch_components["loss_depth"] += loss_depth.item()
