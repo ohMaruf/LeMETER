@@ -126,7 +126,8 @@ def meter_photometric_jitter(
     gamma = float(torch.empty(()).uniform_(*gamma_range))
     brightness = float(torch.empty(()).uniform_(*brightness_range))
     colors = torch.empty(3, 1, 1).uniform_(*color_range)
-    return (image.pow(gamma) * brightness * colors).clamp(0.0, max_value)
+    base = image.clamp(0.0, max_value)
+    return (base.pow(gamma) * brightness * colors).clamp(0.0, max_value)
 
 
 # ---------------------------------------------------------------------------
