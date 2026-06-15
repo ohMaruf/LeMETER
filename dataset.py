@@ -35,6 +35,15 @@ def meter_photometric_jitter(image: Tensor) -> Tensor:
     return (image.pow(gamma) * brightness * colors).clamp(0.0, 255.0)
 
 
+def meter_channel_swap(image: Tensor) -> Tensor:
+    """METER 'channel swap': replace the RGB channels with a random length-3
+    selection (with replacement) from {R, G, B}. augmentation.py picks one
+    triple uniformly from product([0, 1, 2], repeat=3), which is exactly a
+    uniform draw over {0, 1, 2}^3."""
+    indices = torch.randint(0, 3, (3,))
+    return image[indices]
+
+
 class NormalizedNyuDataset(Dataset):
     root = Path("preprocessed_datasets/nyu-depth-v2")
     train_manifest_rel = Path("data/nyu2_train.csv")
@@ -205,6 +214,8 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
             return self.appearance(self.spatial(image))
 
         view = self.spatial(image).to(FLOATING_PRECISION)
+        if torch.rand(()) < METER_AUGMENTATION["c_swap"]:
+            view = meter_channel_swap(view)
         if torch.rand(()) < METER_AUGMENTATION["shifting_strategy"]:
             view = meter_photometric_jitter(view)
         return self.zscore_normalize(view / 255.0)
@@ -228,8 +239,10 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
 
 class DepthTrainDataset(NormalizedNyuDataset):
     """Image + depth target at decoder resolution, in cm, with the original
-    METER training policy (METER_AUGMENTATION): mirror, joint random crop,
-    gamma / brightness / color jitter on the 0-255 scale, depth shift.
+    METER training policy (METER_AUGMENTATION): horizontal mirror, RGB channel
+    swap, joint random crop, and the shifting strategy (gamma / brightness /
+    color jitter on the 0-255 scale + depth shift). Every transform fires with
+    p=0.5, as reported in the paper.
     """
 
     def __init__(self, split, augment: bool):
@@ -238,12 +251,18 @@ class DepthTrainDataset(NormalizedNyuDataset):
 
     def _augment(self, image: Tensor, depth_cm: Tensor) -> tuple[Tensor, Tensor]:
         """image in [0, 255] float CHW at INPUT_RESOLUTION, depth in cm at
-        its stored (full) resolution."""
+        its stored (full) resolution. Transform order follows augmentation.py:
+        mirror, channel swap, crop, shifting strategy (the reference's leading
+        'random flipping' op is a no-op slice, so it is omitted)."""
         aug = METER_AUGMENTATION
 
         if torch.rand(()) < aug["mirror"]:
             image = torch.flip(image, dims=[-1])
             depth_cm = torch.flip(depth_cm, dims=[-1])
+
+        # channel swap affects colour only; the depth target is untouched
+        if torch.rand(()) < aug["c_swap"]:
+            image = meter_channel_swap(image)
 
         if torch.rand(()) < aug["random_crop"]:
             top, left, height, width = transforms.RandomResizedCrop.get_params(

@@ -49,7 +49,7 @@ def pretrain_lejepa_encoder(
     meter = Meter(device, arch)
 
     raw_encoder = LeMeterEncoder(device, meter.encoder).to(device)
-    train_ds = AugmentedNyuDataset("train", globals.VIEWS)
+    train_ds = AugmentedNyuDataset("train", globals.VIEWS, augmentation="meter")
     # shuffle is required: the manifest is grouped by scene (~178 frames per
     # scene), so without it every batch holds near-duplicate frames and the
     # SIGReg batch statistic degenerates
@@ -80,14 +80,20 @@ def pretrain_lejepa_encoder(
     g1 = {
         "params": raw_encoder.parameters(),
         "lr": globals.LEARNING_RATE,
-        "weight_decay": 5e-2,
+        "weight_decay": 1e-2,
     }
-    g2 = {"params": probe.parameters(), "lr": 1e-3, "weight_decay": 1e-7}
+    g2 = {
+        "params": probe.parameters(),
+        "lr": globals.LEARNING_RATE,
+        "weight_decay": 1e-7,
+    }
     opt = torch.optim.AdamW([g1, g2])
     warmup_steps = len(train)
     total_steps = len(train) * globals.PRETRAIN_EPOCHS
-    s1 = LinearLR(opt, start_factor=0.01, total_iters=warmup_steps)
-    s2 = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps, eta_min=globals.LEARNING_RATE * 1e-2)
+    s1 = LinearLR(opt, start_factor=1e-2, total_iters=warmup_steps)
+    s2 = CosineAnnealingLR(
+        opt, T_max=total_steps - warmup_steps, eta_min=globals.LEARNING_RATE * 1e-1
+    )
     scheduler = SequentialLR(
         opt,
         schedulers=[s1, s2],
