@@ -22,7 +22,6 @@ from sigreg import SigReg
 from dataset import DepthDataset
 
 RUNS_DIR = Path("runs")
-DEFAULT_RUN_NAME = "pretrain_encoder"
 
 # periodic encoder snapshots, so we can later chart how the latent space (PCA
 # probing) and the downstream decoder performance evolve with pretraining length
@@ -36,7 +35,7 @@ def pretrain_lejepa_encoder(
         arch: MeterArchitecture = "xxs",
         dataset: DepthDataset = "nyu",
 ):
-    output_dir = RUNS_DIR / f"{dataset}_{arch}_{run_name}"
+    output_dir = RUNS_DIR / f"{dataset}_{arch}_{run_name}_encoder"
     checkpoint_path = output_dir / "last_checkpoint.pt"
     torch.manual_seed(globals.SEED)
     device = enable_hardware_acceleration(config)

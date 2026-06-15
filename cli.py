@@ -1,3 +1,4 @@
+import globals
 from meter import MeterArchitecture
 import argparse
 
@@ -10,8 +11,10 @@ class CliArgs(NamedTuple):
     config: Config
     resume: bool
     name: str
-    arch: MeterArchitecture = "xxs"
-    dataset: DepthDataset = "nyu"
+    arch: MeterArchitecture
+    dataset: DepthDataset
+    freeze_encoder: bool
+    checkpoint_epoch: int
 
 def parse_cli_args() -> CliArgs:
     parser = argparse.ArgumentParser()
@@ -36,6 +39,7 @@ def parse_cli_args() -> CliArgs:
         '--name',
         default='pretrain_encoder',
         help='run name; checkpoints and logs go to runs/<name>/',
+        required=True
     )
     
     parser.add_argument(
@@ -52,6 +56,21 @@ def parse_cli_args() -> CliArgs:
         choices=["nyu", "kitti"],
         default="nyu",
         help='the dataset to use',
+    )
+
+    parser.add_argument(
+        '--no-freeze-encoder',
+        dest='freeze_encoder',
+        action='store_false',
+        default=True,
+        help='disable freezing encoder weights in decoder training',
+    )
+
+    parser.add_argument(
+        '--checkpoint-epoch',
+        type=int,
+        default=globals.PRETRAIN_EPOCHS,
+        help='epoch of encoder checkpoint to load for decoder training',
     )
 
     args = parser.parse_args()

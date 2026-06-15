@@ -1,24 +1,9 @@
-"""Downstream MDE training on NYU, configured by the consts below.
-
-ENCODER_SOURCE selects the initialization (LeJEPA-pretrained vs random
-control); FREEZE_ENCODER selects the protocol: frozen encoder = controlled
-representation probing (runs/decoder/<src>), unfrozen = practical fine-tuning
-with the encoder at 10x lower LR (runs/finetune/<src>). Tracks
-RMSE / AbsRel / d1 on the test split every epoch (goals.txt: convergence
-speed); compare against the published METER xxs numbers
-(RMSE 0.560 m, REL 0.163, d1 0.763 with eval.py on this machine).
-"""
-
-from dataset import DepthTrainDataset
-import json
+from cli import parse_cli_args
+from dataset import DepthDataset, DepthTrainDataset
 import math
 import os
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import torch
 from torch import GradScaler
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
@@ -31,46 +16,37 @@ from dataset import NormalizedNyuDataset
 from eval import delta1, rel, rmse, run_inference, valid_depth_mask
 from hardware_acceleration import Config, enable_hardware_acceleration
 from loss import balanced_loss_function
-from meter import Meter
+from meter import Meter, MeterArchitecture
 
-# which encoder the decoder is trained on; run once per value:
-#   "lejepa" — the pretrained encoder under test
-#   "random" — control: what the decoder achieves with no pretraining at all
-ENCODER_SOURCE = "lejepa"
+RUNS_DIR = Path("runs")
 
-# frozen = representation probing (the controlled comparison between encoders);
-# unfrozen = practical fine-tuning protocol (goals.txt), encoder at 10x lower
-# LR so the pretrained features are adapted rather than overwritten
-FREEZE_ENCODER = False
+# when fine-tuning, the encoder is adapted at 10x lower LR than the decoder so
+# the pretrained features are refined rather than overwritten
 ENCODER_LR = globals.LEARNING_RATE / 10
-
-# epoch 20, not the last checkpoint: snapshot probing showed depth-probe R2
-# peaks at epoch 10-20 (0.30) and slowly degrades to 0.26 by epoch 60, while
-# SIGReg keeps inflating rank with depth-irrelevant directions
-ENCODER_CHECKPOINT_PATH = Path("runs/pretrain_encoder/encoder_epoch_020.pt")
-OUTPUT_DIR = Path("runs/decoder" if FREEZE_ENCODER else "runs/finetune") / ENCODER_SOURCE
-CHECKPOINT_PATH = OUTPUT_DIR / "last_checkpoint.pt"
-BEST_CHECKPOINT_PATH = OUTPUT_DIR / "best_checkpoint.pt"
-
 WEIGHT_DECAY = 1e-4
 
+# directory holding the LeJEPA pretraining snapshots to probe
+ENCODER_RUN_DIR = Path("runs/pretrain_encoder")
 
-def build_frozen_encoder_model(device: torch.device) -> Meter:
-    model = Meter(device, "xxs")  # fresh random encoder + decoder
 
-    if ENCODER_SOURCE == "lejepa":
-        ckpt = torch.load(ENCODER_CHECKPOINT_PATH, map_location="cpu")
-        encoder_state = {
-            key[len("encoder."):]: value
-            for key, value in ckpt["model_state"].items()
-            if key.startswith("encoder.")
-        }
-        model.encoder.load_state_dict(encoder_state)
-        logger.info(f"encoder: LeJEPA weights from {ENCODER_CHECKPOINT_PATH} (epoch {ckpt.get('epoch')})")
-    else:
-        logger.info("encoder: random initialization (no-pretraining control)")
+def build_encoder_model(
+    device: torch.device,
+    arch: MeterArchitecture,
+    encoder_checkpoint_path: Path,
+    freeze_encoder: bool,
+) -> Meter:
+    model = Meter(device, arch)
 
-    if FREEZE_ENCODER:
+    ckpt = torch.load(encoder_checkpoint_path, map_location="cpu")
+    encoder_state = {
+        key[len("encoder."):]: value
+        for key, value in ckpt["model_state"].items()
+        if key.startswith("encoder.")
+    }
+    model.encoder.load_state_dict(encoder_state)
+    logger.info(f"encoder: LeJEPA weights from {encoder_checkpoint_path} (epoch {ckpt.get('epoch')})")
+
+    if freeze_encoder:
         for parameter in model.encoder.parameters():
             parameter.requires_grad = False
     model.to(device)
@@ -96,14 +72,26 @@ def evaluate(model: Meter, loader: DataLoader, device: torch.device) -> dict[str
     return {key: value / count for key, value in totals.items()}
 
 
-def train_decoder():
-    RESUME = True
+def train_decoder(
+        run_name: str,
+        config: Config = Config.DEFAULT,
+        resume: bool = True,
+        arch: MeterArchitecture = "xxs",
+        dataset: DepthDataset = "nyu",
+        freeze_encoder: bool = True,
+        checkpoint_epoch: int = globals.DECODER_EPOCHS,
+):
+    output_dir = RUNS_DIR / f"{dataset}_{arch}_{run_name}_decoder"
+    checkpoint_path = output_dir / "last_checkpoint.pt"
+    best_checkpoint_path = output_dir / "best_checkpoint.pt"
+    encoder_checkpoint_path = ENCODER_RUN_DIR / f"encoder_epoch_{checkpoint_epoch:03d}.pt"
     torch.manual_seed(globals.SEED)
-    DEVICE = enable_hardware_acceleration(Config.DEFAULT)
+    device = enable_hardware_acceleration(config)
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"run directory: {output_dir}")
 
-    model = build_frozen_encoder_model(DEVICE)
+    raw_model = build_encoder_model(device, arch, encoder_checkpoint_path, freeze_encoder)
 
     train = DataLoader(
         DepthTrainDataset("train", augment=True),
@@ -121,9 +109,9 @@ def train_decoder():
         num_workers=min(globals.DATALOADER_WORKERS, os.cpu_count() or 1),
     )
 
-    param_groups = [{"params": model.decoder.parameters(), "lr": globals.LEARNING_RATE}]
-    if not FREEZE_ENCODER:
-        param_groups.append({"params": model.encoder.parameters(), "lr": ENCODER_LR})
+    param_groups = [{"params": raw_model.decoder.parameters(), "lr": globals.LEARNING_RATE}]
+    if not freeze_encoder:
+        param_groups.append({"params": raw_model.encoder.parameters(), "lr": ENCODER_LR})
     opt = torch.optim.AdamW(param_groups, weight_decay=WEIGHT_DECAY)
     warmup_steps = len(train)
     total_steps = len(train) * globals.DECODER_EPOCHS
@@ -131,8 +119,8 @@ def train_decoder():
     s2 = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps, eta_min=globals.LEARNING_RATE * 1e-2)
     scheduler = SequentialLR(opt, schedulers=[s1, s2], milestones=[warmup_steps])
 
-    scaler = GradScaler(enabled=(DEVICE.type == "cuda"))
-    loss_fn = balanced_loss_function(DEVICE)
+    scaler = GradScaler(enabled=(device.type == "cuda"))
+    loss_fn = balanced_loss_function(device)
 
     history = {
         "train_loss": [],
@@ -147,13 +135,12 @@ def train_decoder():
     best_rmse = math.inf
     start_epoch = 0
 
-    if RESUME and CHECKPOINT_PATH.exists():
-        ckpt = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
-        model.load_state_dict(ckpt["model_state"])
+    if resume and checkpoint_path.exists():
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        raw_model.load_state_dict(ckpt["model_state"])
         opt.load_state_dict(ckpt["optimizer_state"])
         scheduler.load_state_dict(ckpt["scheduler_state"])
-        if ckpt.get("scaler_state"):
-            scaler.load_state_dict(ckpt["scaler_state"])
+        scaler.load_state_dict(ckpt["scaler_state"])
         history = {**history, **ckpt.get("history", {})}
         best_rmse = ckpt.get("best_rmse", best_rmse)
         start_epoch = int(ckpt.get("epoch", 0)) + 1
@@ -162,34 +149,34 @@ def train_decoder():
         torch.set_rng_state(rng["torch"].cpu())
         if rng.get("cuda") and torch.cuda.is_available():
             torch.cuda.set_rng_state_all([t.cpu() for t in rng["cuda"]])
-        if rng.get("mps") and hasattr(torch.mps, "set_rng_state"):
+        if rng.get("mps") and torch.backends.mps.is_available():
             torch.mps.set_rng_state(rng["mps"].cpu())
 
-        logger.warn(f"resumed from {CHECKPOINT_PATH} at epoch #{start_epoch}")
+        logger.warn(f"resumed from {checkpoint_path} at epoch #{start_epoch}")
 
-    if DEVICE.type == "cuda":
+    if device.type == "cuda":
         logger.info("Enabling torch.compile for CUDA")
-        compiled_model = torch.compile(model)
+        model = torch.compile(raw_model)
     else:
-        logger.warn(f"torch.compile is not supported/stable on {DEVICE.type}, skipping")
-        compiled_model = model
+        logger.warn(f"torch.compile is not supported/stable on {device.type}, skipping")
+        model = raw_model
 
     for epoch in range(start_epoch, globals.DECODER_EPOCHS):
-        compiled_model.train()
-        if FREEZE_ENCODER:
+        model.train()
+        if freeze_encoder:
             # the encoder must stay in eval mode: BatchNorm running stats are
             # part of the frozen representation under evaluation
-            model.encoder.eval()
+            raw_model.encoder.eval()
 
         epoch_loss = 0.0
         epoch_components = {"loss_depth": 0.0, "loss_ssim": 0.0, "loss_normal": 0.0, "loss_grad": 0.0}
         for batch in tqdm(train, total=len(train), position=0, leave=True):
             opt.zero_grad(set_to_none=True)
 
-            with torch.autocast(DEVICE.type, dtype=torch.bfloat16):
-                x = batch["image"].to(DEVICE, non_blocking=True)
-                y = batch["depth"].to(DEVICE, non_blocking=True)
-                z = compiled_model(x)
+            with torch.autocast(device.type, dtype=torch.bfloat16):
+                x = batch["image"].to(device, non_blocking=True)
+                y = batch["depth"].to(device, non_blocking=True)
+                z = model(x)
 
             # loss in fp32, outside autocast: ssim computes E[x^2] - mu^2 at
             # centimeter scale (~1e5), which cancels catastrophically in bf16
@@ -211,14 +198,14 @@ def train_decoder():
             scaler.unscale_(opt)
             # spike protection only: the METER loss works in centimeters, so
             # healthy gradient norms are ~50, far above lejepa.py's scale
-            trainable = [p for p in model.parameters() if p.requires_grad]
+            trainable = [p for p in raw_model.parameters() if p.requires_grad]
             torch.nn.utils.clip_grad_norm_(trainable, max_norm=500.0)
             scaler.step(opt)
             scaler.update()
             scheduler.step()
 
         train_loss = epoch_loss / len(train)
-        metrics = evaluate(model, test, DEVICE)
+        metrics = evaluate(raw_model, test, device)
         logger.info(
             f"[{epoch}/{globals.DECODER_EPOCHS}] train/loss {train_loss:.4f} "
             f"test/RMSE {metrics['rmse']:.3f}m test/REL {metrics['rel']:.3f} "
@@ -237,7 +224,7 @@ def train_decoder():
 
         checkpoint = {
             "epoch": epoch,
-            "model_state": model.state_dict(),
+            "model_state": raw_model.state_dict(),
             "optimizer_state": opt.state_dict(),
             "scheduler_state": scheduler.state_dict(),
             "scaler_state": scaler.state_dict() if scaler.is_enabled() else None,
@@ -251,35 +238,25 @@ def train_decoder():
         }
 
         # to avoid risk of corrupting the previous checkpoint file
-        temp_path = CHECKPOINT_PATH.with_suffix(".tmp")
+        temp_path = checkpoint_path.with_suffix(".tmp")
         torch.save(checkpoint, temp_path)
-        temp_path.replace(CHECKPOINT_PATH)
+        temp_path.replace(checkpoint_path)
         if is_best:
-            torch.save(checkpoint, BEST_CHECKPOINT_PATH)
-
-        with open(OUTPUT_DIR / "history.json", "w") as history_file:
-            json.dump(history, history_file)
-        plot_history(history, OUTPUT_DIR / "history.png")
+            torch.save(checkpoint, best_checkpoint_path)
 
 
-def plot_history(history: dict, path: Path):
-    fig, axes = plt.subplots(1, 3, figsize=(13, 3.5))
-    axes[0].plot(history["train_loss"], label="total")
-    for component in ("loss_depth", "loss_ssim", "loss_normal", "loss_grad"):
-        axes[0].plot(history[component], label=component.removeprefix("loss_"), lw=0.9)
-    axes[0].set_title("train loss"), axes[0].legend(fontsize=8)
-    axes[1].plot(history["rmse"], label="RMSE (m)")
-    axes[1].plot(history["rel"], label="AbsRel")
-    axes[1].set_title("test error"), axes[1].legend()
-    axes[2].plot(history["delta1"])
-    axes[2].set_title("test δ1")
-    for ax in axes:
-        ax.set_xlabel("epoch"), ax.grid(alpha=0.3)
-    fig.suptitle("frozen-encoder decoder training")
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+def main():
+    args = parse_cli_args()
+    train_decoder(
+        run_name=args.name,
+        config=args.config,
+        resume=args.resume,
+        arch=args.arch,
+        dataset=args.dataset,
+        freeze_encoder=args.freeze_encoder,
+        checkpoint_epoch=args.checkpoint_epoch,
+    )
 
 
 if __name__ == "__main__":
-    raise SystemExit(train_decoder())
+    raise SystemExit(main())
