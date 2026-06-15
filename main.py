@@ -2,6 +2,8 @@ from cli import parse_cli_args
 from download_datasets import download_datasets
 from lejepa import pretrain_lejepa_encoder
 from preprocessing import preprocess_datasets
+from train_decoder import train_decoder
+
 
 def main():
     args = parse_cli_args()
@@ -14,6 +16,16 @@ def main():
         arch=args.arch,
         dataset=args.dataset
     )
+    if args.train_decoder:
+        train_decoder(
+            run_name=args.name,
+            config=args.config,
+            resume=args.resume,
+            arch=args.arch,
+            dataset=args.dataset,
+            freeze_encoder=args.freeze_encoder,
+            checkpoint_epoch=args.checkpoint_epoch,
+        )
 
 
 if __name__ == "__main__":

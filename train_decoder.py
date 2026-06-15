@@ -25,9 +25,6 @@ RUNS_DIR = Path("runs")
 ENCODER_LR = globals.LEARNING_RATE / 10
 WEIGHT_DECAY = 1e-4
 
-# directory holding the LeJEPA pretraining snapshots to probe
-ENCODER_RUN_DIR = Path("runs/pretrain_encoder")
-
 
 def build_encoder_model(
     device: torch.device,
@@ -84,7 +81,8 @@ def train_decoder(
     output_dir = RUNS_DIR / f"{dataset}_{arch}_{run_name}_decoder"
     checkpoint_path = output_dir / "last_checkpoint.pt"
     best_checkpoint_path = output_dir / "best_checkpoint.pt"
-    encoder_checkpoint_path = ENCODER_RUN_DIR / f"encoder_epoch_{checkpoint_epoch:03d}.pt"
+    input_dir = RUNS_DIR / f"{dataset}_{arch}_{run_name}_encoder"
+    encoder_checkpoint_path = input_dir / f"encoder_epoch_{checkpoint_epoch:03d}.pt"
     torch.manual_seed(globals.SEED)
     device = enable_hardware_acceleration(config)
 

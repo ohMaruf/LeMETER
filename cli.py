@@ -15,62 +15,72 @@ class CliArgs(NamedTuple):
     dataset: DepthDataset
     freeze_encoder: bool
     checkpoint_epoch: int
+    train_decoder: bool
+
 
 def parse_cli_args() -> CliArgs:
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        '--config',
-        '-c',
+        "--config",
+        "-c",
         type=Config,
         choices=list(Config),
         default=Config.DEFAULT,
-        help='the gpu configuration to use',
+        help="the gpu configuration to use",
     )
 
     parser.add_argument(
-        '--no-resume',
-        dest='resume',
-        action='store_false',
-        help='disable resuming training from previous runs',
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="disable resuming training from previous runs",
     )
 
     parser.add_argument(
-        '--name',
-        default='pretrain_encoder',
-        help='run name; checkpoints and logs go to runs/<name>/',
-        required=True
+        "--name",
+        default="pretrain_encoder",
+        help="run name; checkpoints and logs go to runs/<name>/",
+        required=True,
     )
-    
+
     parser.add_argument(
-        '--arch',
+        "--arch",
         type=str,
         choices=["xxs", "xs", "s"],
         default="xxs",
-        help='the model architecture to use',
+        help="the model architecture to use",
     )
 
     parser.add_argument(
-        '--dataset',
+        "--dataset",
         type=str,
         choices=["nyu", "kitti"],
         default="nyu",
-        help='the dataset to use',
+        help="the dataset to use",
     )
 
     parser.add_argument(
-        '--no-freeze-encoder',
-        dest='freeze_encoder',
-        action='store_false',
+        "--train-decoder",
+        dest="train_decoder",
+        action="store_true",
+        default=False,
+        help="enable training decoder",
+    )
+
+    parser.add_argument(
+        "--no-freeze-encoder",
+        dest="freeze_encoder",
+        action="store_false",
         default=True,
-        help='disable freezing encoder weights in decoder training',
+        help="disable freezing encoder weights in decoder training",
     )
 
     parser.add_argument(
-        '--checkpoint-epoch',
+        "--checkpoint-epoch",
         type=int,
         default=globals.PRETRAIN_EPOCHS,
-        help='epoch of encoder checkpoint to load for decoder training',
+        help="epoch of encoder checkpoint to load for decoder training",
     )
 
     args = parser.parse_args()
