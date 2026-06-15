@@ -41,13 +41,13 @@ DATALOADER_WORKERS = 24
 
 FLOATING_PRECISION = torch.float32
 NUM_SLICES = 256
-PROJ_DIM = 128
+PROJ_DIM = 160
 EMBEDDING_DIM = 160
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-3
 # pretraining starts from a random encoder, so it needs a full schedule
 # (original METER was trained for 60 epochs); the decoder alone converges faster
-PRETRAIN_EPOCHS = 20
+PRETRAIN_EPOCHS = 60
 LAMBDA = 5e-2
 VIEWS = 8
 

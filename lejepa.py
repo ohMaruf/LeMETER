@@ -91,9 +91,7 @@ def pretrain_lejepa_encoder(
     warmup_steps = len(train)
     total_steps = len(train) * globals.PRETRAIN_EPOCHS
     s1 = LinearLR(opt, start_factor=1e-2, total_iters=warmup_steps)
-    s2 = CosineAnnealingLR(
-        opt, T_max=total_steps - warmup_steps, eta_min=globals.LEARNING_RATE * 1e-1
-    )
+    s2 = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps, eta_min=globals.LEARNING_RATE * 5e-2)
     scheduler = SequentialLR(
         opt,
         schedulers=[s1, s2],
