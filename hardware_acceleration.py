@@ -81,8 +81,12 @@ def _rx9060xt_config(config: Config) -> torch.device:
 
 def enable_hardware_acceleration(config: Config) -> torch.device:
     if config == Config.DEFAULT:
-        return _default_config(config)
+        device = _default_config(config)
+        if device.type == "cuda":
+            torch.set_float32_matmul_precision("high")
     elif config == Config.RX9060XT:
-        return _rx9060xt_config(config)
+        device = _rx9060xt_config(config)
     else:
         assert False, f"unreachable, got unknown config {config}"
+
+    return device

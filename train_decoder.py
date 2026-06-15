@@ -46,11 +46,14 @@ def build_encoder_model(
         if key.startswith("encoder.")
     }
     model.encoder.load_state_dict(encoder_state)
-    logger.info(f"encoder: LeJEPA weights from {encoder_checkpoint_path} (epoch {ckpt.get('epoch')})")
+    logger.info(f"loaded encoder weights from {encoder_checkpoint_path} (epoch {ckpt.get('epoch') + 1})")
 
     if freeze_encoder:
         for parameter in model.encoder.parameters():
             parameter.requires_grad = False
+        logger.info("encoder is frozen")
+    else:
+        logger.info("encoder is NOT frozen")
     model.to(device)
     return model
 
@@ -209,11 +212,9 @@ def train_decoder(
 
         train_loss = epoch_loss / len(train)
         metrics = evaluate(raw_model, test, device)
-        logger.info(
-            f"[{epoch}/{DECODER_EPOCHS}] train/loss {train_loss:.4f} "
-            f"test/RMSE {metrics['rmse']:.3f}m test/REL {metrics['rel']:.3f} "
-            f"test/d1 {metrics['delta1']:.3f}"
-        )
+        logger.info(f"[{epoch}/{DECODER_EPOCHS}] test/RMSE {metrics['rmse']:.3f}m")
+        logger.info(f"[{epoch}/{DECODER_EPOCHS}] test/REL {metrics['rel']:.3f}")
+        logger.info(f"[{epoch}/{DECODER_EPOCHS}] test/d1 {metrics['delta1']:.3f}")
 
         history["train_loss"].append(train_loss)
         for component, total in epoch_components.items():
