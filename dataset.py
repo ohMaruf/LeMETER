@@ -7,10 +7,7 @@ from globals import (
     INPUT_RESOLUTION,
     TRAIN_DEPTH_TO_CM,
     OUTPUT_RESOLUTION,
-    METER_AUGMENTATION,
-    LEJEPA_AUGMENTATION,
 )
-from torchvision import transforms
 from torchvision.transforms import v2
 from torchvision.transforms import functional as TF
 from PIL import Image
@@ -21,27 +18,9 @@ from tqdm import tqdm
 from typing import Literal
 
 import logger
+from augmentation import AugmentationPolicy, ViewAugmentation, PairedDepthAugmentation
 
 DepthDataset = Literal["nyu", "kitti"]
-
-
-def meter_photometric_jitter(image: Tensor) -> Tensor:
-    """Image part of METER's 'shifting strategy': gamma, brightness and
-    per-channel color jitter (±10%) applied on the 0-255 scale, as in the
-    original recipe (augmentation.py / METER paper Sec. III-C)."""
-    gamma = float(torch.empty(()).uniform_(0.9, 1.1))
-    brightness = float(torch.empty(()).uniform_(0.9, 1.1))
-    colors = torch.empty(3, 1, 1).uniform_(0.9, 1.1)
-    return (image.pow(gamma) * brightness * colors).clamp(0.0, 255.0)
-
-
-def meter_channel_swap(image: Tensor) -> Tensor:
-    """METER 'channel swap': replace the RGB channels with a random length-3
-    selection (with replacement) from {R, G, B}. augmentation.py picks one
-    triple uniformly from product([0, 1, 2], repeat=3), which is exactly a
-    uniform draw over {0, 1, 2}^3."""
-    indices = torch.randint(0, 3, (3,))
-    return image[indices]
 
 
 class NormalizedNyuDataset(Dataset):
@@ -131,7 +110,7 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         self,
         split: Literal["train", "test"],
         views=1,
-        augmentation: Literal["lejepa", "meter"] = "lejepa",
+        augmentation: AugmentationPolicy = "lejepa",
     ) -> None:
         super().__init__(split)
 
@@ -141,45 +120,9 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         # so depth PNG decoding stays out of the training workers
         self.mean_depth_cm = self._load_mean_depth_cache(split)
 
-        if augmentation == "lejepa":
-            # operates on uint8 [0, 255]; ToDtype(scale=True) only rescales on
-            # an actual dtype conversion, so the input must stay uint8 until here
-            self.spatial = v2.Compose([
-                v2.ToImage(),
-                # `size` is only the output resolution; `scale` is the fraction
-                # of the image area kept by the crop (default would be 0.08-1.0)
-                v2.RandomResizedCrop(
-                    size=INPUT_RESOLUTION,
-                    scale=LEJEPA_AUGMENTATION["random_crop_scale"],
-                    antialias=True,
-                ),
-                v2.RandomHorizontalFlip(p=LEJEPA_AUGMENTATION["mirror"]),
-                v2.ToDtype(FLOATING_PRECISION, scale=True),
-            ])
-
-            self.appearance = v2.Compose([
-                v2.RandomApply([v2.ColorJitter(0.8, 0.8, 0.8, 0.2)], p=LEJEPA_AUGMENTATION["color_jitter"]),
-                v2.RandomGrayscale(p=LEJEPA_AUGMENTATION["grayscale"]),
-                v2.RandomApply([v2.GaussianBlur(kernel_size=7, sigma=(0.1, 2.0))], p=LEJEPA_AUGMENTATION["gaussian_blur"]),
-                v2.RandomApply([v2.RandomSolarize(threshold=0.5)], p=LEJEPA_AUGMENTATION["solarize"]),
-                self.zscore_normalize,
-            ])
-        else:
-            # METER's conservative supervised policy as SSL views (depth shift
-            # excluded: pretraining uses no labels); stays uint8 so the
-            # photometric jitter can run on the 0-255 scale like the original
-            self.spatial = v2.Compose([
-                v2.ToImage(),
-                v2.RandomApply([
-                    v2.RandomResizedCrop(
-                        size=INPUT_RESOLUTION,
-                        scale=METER_AUGMENTATION["random_crop_scale"],
-                        ratio=METER_AUGMENTATION["random_crop_ratio"],
-                        antialias=True,
-                    ),
-                ], p=METER_AUGMENTATION["random_crop"]),
-                v2.RandomHorizontalFlip(p=METER_AUGMENTATION["mirror"]),
-            ])
+        # all augmentation lives in augmentation.py; normalize is passed in so
+        # the METER channel swap / shifting strategy run on un-normalized pixels
+        self.view_aug = ViewAugmentation(augmentation, self.zscore_normalize)
 
         self.test = v2.Compose(
             [
@@ -209,17 +152,6 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         logger.info(f"wrote {cache_path}")
         return means
 
-    def _make_view(self, image: Tensor) -> Tensor:
-        if self.augmentation == "lejepa":
-            return self.appearance(self.spatial(image))
-
-        view = self.spatial(image).to(FLOATING_PRECISION)
-        if torch.rand(()) < METER_AUGMENTATION["c_swap"]:
-            view = meter_channel_swap(view)
-        if torch.rand(()) < METER_AUGMENTATION["shifting_strategy"]:
-            view = meter_photometric_jitter(view)
-        return self.zscore_normalize(view / 255.0)
-
     def __getitem__(self, index):
         sample = self.samples.iloc[index]
         image = self._load_image_tensor_uint8(self._resolve_sample_path(sample["image_path"]))
@@ -231,61 +163,24 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         if self.views > 1:
             # each view gets its own crop: spatial invariance is the main
             # signal LeJEPA learns from, photometric jitter alone is too weak
-            return torch.stack([self._make_view(image) for _ in range(self.views)]), mean_depth_cm
+            return torch.stack([self.view_aug(image) for _ in range(self.views)]), mean_depth_cm
 
         return self.test(image), mean_depth_cm
 
 
 
 class DepthTrainDataset(NormalizedNyuDataset):
-    """Image + depth target at decoder resolution, in cm, with the original
-    METER training policy (METER_AUGMENTATION): horizontal mirror, RGB channel
-    swap, joint random crop, and the shifting strategy (gamma / brightness /
-    color jitter on the 0-255 scale + depth shift). Every transform fires with
-    p=0.5, as reported in the paper.
+    """Image + depth target at decoder resolution, in cm. The paired
+    augmentation (see augmentation.PairedDepthAugmentation) applies the chosen
+    policy jointly to image and depth; the default "meter" policy is horizontal
+    mirror, RGB channel swap, joint random crop, and the shifting strategy
+    (gamma / brightness / color jitter + depth shift), each at p=0.5.
     """
 
-    def __init__(self, split, augment: bool):
+    def __init__(self, split, augment: bool, augmentation: AugmentationPolicy = "meter"):
         super().__init__(split)
         self.augment = augment
-
-    def _augment(self, image: Tensor, depth_cm: Tensor) -> tuple[Tensor, Tensor]:
-        """image in [0, 255] float CHW at INPUT_RESOLUTION, depth in cm at
-        its stored (full) resolution. Transform order follows augmentation.py:
-        mirror, channel swap, crop, shifting strategy (the reference's leading
-        'random flipping' op is a no-op slice, so it is omitted)."""
-        aug = METER_AUGMENTATION
-
-        if torch.rand(()) < aug["mirror"]:
-            image = torch.flip(image, dims=[-1])
-            depth_cm = torch.flip(depth_cm, dims=[-1])
-
-        # channel swap affects colour only; the depth target is untouched
-        if torch.rand(()) < aug["c_swap"]:
-            image = meter_channel_swap(image)
-
-        if torch.rand(()) < aug["random_crop"]:
-            top, left, height, width = transforms.RandomResizedCrop.get_params(
-                image,
-                scale=list(aug["random_crop_scale"]),
-                ratio=list(aug["random_crop_ratio"]),
-            )
-            # the same relative window on the full-resolution depth map
-            sh = depth_cm.shape[-2] / image.shape[-2]
-            sw = depth_cm.shape[-1] / image.shape[-1]
-            depth_cm = TF.crop(
-                depth_cm, round(top * sh), round(left * sw), round(height * sh), round(width * sw)
-            )
-            image = TF.resized_crop(
-                image, top, left, height, width, list(INPUT_RESOLUTION), antialias=True
-            )
-
-        if torch.rand(()) < aug["shifting_strategy"]:
-            image = meter_photometric_jitter(image)
-            shift_cm = float(torch.randint(-10, 11, ()))
-            depth_cm = (depth_cm + shift_cm).clamp_min(0.0)
-
-        return image, depth_cm
+        self.aug = PairedDepthAugmentation(augmentation)
 
     def __getitem__(self, index):
         sample = self.samples.iloc[index]
@@ -293,7 +188,7 @@ class DepthTrainDataset(NormalizedNyuDataset):
         depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"])) * TRAIN_DEPTH_TO_CM
 
         if self.augment:
-            image, depth = self._augment(image, depth)
+            image, depth = self.aug(image, depth)
 
         image = self._normalize_image(image)
         # adaptive pooling handles the arbitrary post-crop depth resolution

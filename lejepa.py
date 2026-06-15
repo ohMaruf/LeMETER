@@ -49,7 +49,7 @@ def pretrain_lejepa_encoder(
     meter = Meter(device, arch)
 
     raw_encoder = LeMeterEncoder(device, meter.encoder).to(device)
-    train_ds = AugmentedNyuDataset("train", globals.VIEWS, augmentation="meter")
+    train_ds = AugmentedNyuDataset("train", globals.VIEWS, augmentation="lemeter")
     # shuffle is required: the manifest is grouped by scene (~178 frames per
     # scene), so without it every batch holds near-duplicate frames and the
     # SIGReg batch statistic degenerates

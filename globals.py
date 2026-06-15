@@ -3,35 +3,6 @@ import torch
 NYU_IMAGE_RESOLUTION = (480, 640)  # height, width (rows x columns notation)
 INPUT_RESOLUTION = (192, 256)  # height, width (rows x columns notation)
 
-# Two augmentation presets (probabilities and ranges):
-# - METER: the supervised policy from the METER paper (Sec. III-C) and its
-#   reference augmentation.py — horizontal mirror, RGB channel swap, random
-#   crop, and the "shifting strategy" (±10% gamma/brightness/color on the 0-255
-#   scale + ±10 cm depth shift on labels). The paper applies p=0.5 to every
-#   random transform in the policy. Used by DepthTrainDataset.
-#   (augmentation.py also lists a "random flipping" op, but its slice is a no-op
-#   — step ::1 — so METER never actually applied a vertical flip; we omit it.)
-# - LEJEPA: the SSL view-generation recipe (LeJEPA/DINO-style) — aggressive
-#   crops and strong photometric jitter, since invariance to them is the
-#   training signal. Default for AugmentedNyuDataset.
-METER_AUGMENTATION = {
-    "mirror": 0.5,
-    "c_swap": 0.5,
-    "random_crop": 0.5,
-    "random_crop_scale": (0.6, 1.0),
-    "random_crop_ratio": (0.75, 4 / 3),
-    "shifting_strategy": 0.5,
-}
-
-LEJEPA_AUGMENTATION = {
-    "mirror": 0.5,
-    "random_crop_scale": (0.4, 1.0),
-    "color_jitter": 0.8,
-    "grayscale": 0.2,
-    "gaussian_blur": 0.5,
-    "solarize": 0.2,
-}
-
 SEED = 3407
 
 # the training box has 32 cores; augmentation (8 views per sample) is the
