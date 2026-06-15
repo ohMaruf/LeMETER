@@ -100,6 +100,10 @@ def pretrain_lejepa_encoder(
         "inv_loss": [],
         "lejepa_loss": [],
         "probe_r2": [],
+        # std of a random 1-D projection of the SIGReg output, averaged over the
+        # epoch; SIGReg targets N(0,1), so this should climb to ~1.0. A plateau
+        # well below 1 means the term is too weak — raise globals.LAMBDA.
+        "proj_sigma": [],
         "lr": [],
         "grad_norm": [],
         "epoch_seconds": [],
@@ -150,6 +154,11 @@ def pretrain_lejepa_encoder(
         probe_y_sum = 0.0
         probe_y_sq = 0.0
         probe_count = 0
+        # streaming per-coordinate stats of the projection, to recover the
+        # std of a random 1-D slice: E[Var(proj @ a)] = mean_j Var(proj_j)
+        proj_sum = torch.zeros(globals.PROJ_DIM, device=device)
+        proj_sq = torch.zeros(globals.PROJ_DIM, device=device)
+        proj_count = 0
         for views, y in tqdm(train, total=len(train), position=0, leave=True):
             opt.zero_grad(set_to_none=True)
 
@@ -175,6 +184,11 @@ def pretrain_lejepa_encoder(
                 logger.error(msg)
                 raise RuntimeError(msg)
 
+            flat_proj = proj.detach().float().reshape(-1, proj.shape[-1])
+            proj_sum += flat_proj.sum(0)
+            proj_sq += flat_proj.square().sum(0)
+            proj_count += flat_proj.shape[0]
+
             epoch_sigreg += sigreg_loss.item()
             epoch_inv += inv_loss.item()
             epoch_lejepa += lejepa_loss.item()
@@ -196,14 +210,20 @@ def pretrain_lejepa_encoder(
         probe_ss_tot = probe_y_sq - probe_y_sum**2 / max(probe_count, 1)
         probe_r2 = 1.0 - probe_ss_res / max(probe_ss_tot, 1e-12)
 
+        # E[std of a random unit-direction slice] = sqrt(mean_j Var(proj_j))
+        proj_var = (proj_sq / proj_count - (proj_sum / proj_count).square()).clamp_min(0.0)
+        proj_sigma = proj_var.mean().sqrt().item()
+
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/lejepa {epoch_lejepa / len(train)}")
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/sigreg {epoch_sigreg / len(train)}")
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/probe_r2 {probe_r2:.4f}")
+        logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/proj_sigma {proj_sigma:.4f} (target 1.0)")
 
         history["sigreg_loss"].append(epoch_sigreg / len(train))
         history["inv_loss"].append(epoch_inv / len(train))
         history["lejepa_loss"].append(epoch_lejepa / len(train))
         history["probe_r2"].append(probe_r2)
+        history["proj_sigma"].append(proj_sigma)
         history["lr"].append(scheduler.get_last_lr()[0])
         history["grad_norm"].append(epoch_grad_norm / len(train))
         history["epoch_seconds"].append(time.time() - epoch_start)
