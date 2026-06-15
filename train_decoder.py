@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 from torch import GradScaler
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -23,7 +23,12 @@ RUNS_DIR = Path("runs")
 # when fine-tuning, the encoder is adapted at 10x lower LR than the decoder so
 # the pretrained features are refined rather than overwritten
 ENCODER_LR = globals.LEARNING_RATE / 10
-WEIGHT_DECAY = 1e-4
+DECODER_BATCH_SIZE = 128
+DECODER_EPOCHS = 60
+# METER paper: AdamW with weight decay 0.01, LR decayed x0.1 every 20 epochs
+WEIGHT_DECAY = 1e-2
+LR_DECAY_EVERY = 20
+LR_DECAY_GAMMA = 0.1
 
 
 def build_encoder_model(
@@ -76,7 +81,7 @@ def train_decoder(
         arch: MeterArchitecture = "xxs",
         dataset: DepthDataset = "nyu",
         freeze_encoder: bool = True,
-        checkpoint_epoch: int = globals.DECODER_EPOCHS,
+        checkpoint_epoch: int = globals.PRETRAIN_EPOCHS,
 ):
     output_dir = RUNS_DIR / f"{dataset}_{arch}_{run_name}_decoder"
     checkpoint_path = output_dir / "last_checkpoint.pt"
@@ -93,7 +98,7 @@ def train_decoder(
 
     train = DataLoader(
         DepthTrainDataset("train", augment=True),
-        batch_size=globals.BATCH_SIZE,
+        batch_size=DECODER_BATCH_SIZE,
         shuffle=True,
         drop_last=True,
         num_workers=min(globals.DATALOADER_WORKERS, os.cpu_count() or 1),
@@ -110,12 +115,10 @@ def train_decoder(
     param_groups = [{"params": raw_model.decoder.parameters(), "lr": globals.LEARNING_RATE}]
     if not freeze_encoder:
         param_groups.append({"params": raw_model.encoder.parameters(), "lr": ENCODER_LR})
-    opt = torch.optim.AdamW(param_groups, weight_decay=WEIGHT_DECAY)
-    warmup_steps = len(train)
-    total_steps = len(train) * globals.DECODER_EPOCHS
-    s1 = LinearLR(opt, start_factor=0.01, total_iters=warmup_steps)
-    s2 = CosineAnnealingLR(opt, T_max=total_steps - warmup_steps, eta_min=globals.LEARNING_RATE * 1e-2)
-    scheduler = SequentialLR(opt, schedulers=[s1, s2], milestones=[warmup_steps])
+    # METER paper: AdamW (beta1=0.9, beta2=0.999), step LR decay x0.1 every 20
+    # epochs (so it steps once per epoch, not per batch)
+    opt = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=WEIGHT_DECAY)
+    scheduler = StepLR(opt, step_size=LR_DECAY_EVERY, gamma=LR_DECAY_GAMMA)
 
     scaler = GradScaler(enabled=(device.type == "cuda"))
     loss_fn = balanced_loss_function(device)
@@ -159,7 +162,7 @@ def train_decoder(
         logger.warn(f"torch.compile is not supported/stable on {device.type}, skipping")
         model = raw_model
 
-    for epoch in range(start_epoch, globals.DECODER_EPOCHS):
+    for epoch in range(start_epoch, DECODER_EPOCHS):
         model.train()
         if freeze_encoder:
             # the encoder must stay in eval mode: BatchNorm running stats are
@@ -200,12 +203,14 @@ def train_decoder(
             torch.nn.utils.clip_grad_norm_(trainable, max_norm=500.0)
             scaler.step(opt)
             scaler.update()
-            scheduler.step()
+
+        # paper decays the LR per epoch, not per step
+        scheduler.step()
 
         train_loss = epoch_loss / len(train)
         metrics = evaluate(raw_model, test, device)
         logger.info(
-            f"[{epoch}/{globals.DECODER_EPOCHS}] train/loss {train_loss:.4f} "
+            f"[{epoch}/{DECODER_EPOCHS}] train/loss {train_loss:.4f} "
             f"test/RMSE {metrics['rmse']:.3f}m test/REL {metrics['rel']:.3f} "
             f"test/d1 {metrics['delta1']:.3f}"
         )
