@@ -22,6 +22,8 @@ from typing import Literal
 
 import logger
 
+DepthDataset = Literal["nyu", "kitti"]
+
 
 def meter_photometric_jitter(image: Tensor) -> Tensor:
     """Image part of METER's 'shifting strategy': gamma, brightness and

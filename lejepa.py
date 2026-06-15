@@ -1,3 +1,4 @@
+from meter import MeterArchitecture
 import json
 import os
 import time
@@ -13,32 +14,42 @@ from torch.utils.data import DataLoader
 
 import globals
 import logger
+from cli import parse_cli_args
 from dataset import AugmentedNyuDataset
 from hardware_acceleration import Config, enable_hardware_acceleration
 from meter import LeMeterEncoder, Meter
 from sigreg import SigReg
+from dataset import DepthDataset
 
-OUTPUT_DIR = Path("runs/pretrain_encoder")
-CHECKPOINT_PATH = OUTPUT_DIR / "last_checkpoint.pt"
+RUNS_DIR = Path("runs")
+DEFAULT_RUN_NAME = "pretrain_encoder"
 
 # periodic encoder snapshots, so we can later chart how the latent space (PCA
 # probing) and the downstream decoder performance evolve with pretraining length
 SNAPSHOT_EVERY = 5
 
 
-def pretrain_lejepa_encoder():
-    RESUME = True
+def pretrain_lejepa_encoder(
+        run_name: str,
+        config: Config = Config.DEFAULT,
+        resume: bool = True,
+        arch: MeterArchitecture = "xxs",
+        dataset: DepthDataset = "nyu",
+):
+    output_dir = RUNS_DIR / f"{dataset}_{arch}_{run_name}"
+    checkpoint_path = output_dir / "last_checkpoint.pt"
     torch.manual_seed(globals.SEED)
-    DEVICE = enable_hardware_acceleration(Config.DEFAULT)
+    device = enable_hardware_acceleration(config)
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"run directory: {output_dir}")
 
     # random initialization: starting from the depth-supervised METER weights
     # would contaminate the SSL-vs-supervised comparison, since the encoder
     # would already contain depth-task information before LeJEPA runs
-    meter = Meter(DEVICE, "xxs")
+    meter = Meter(device, arch)
 
-    raw_encoder = LeMeterEncoder(DEVICE, meter.encoder).to(DEVICE)
+    raw_encoder = LeMeterEncoder(device, meter.encoder).to(device)
     train_ds = AugmentedNyuDataset("train", globals.VIEWS)
     # shuffle is required: the manifest is grouped by scene (~178 frames per
     # scene), so without it every batch holds near-duplicate frames and the
@@ -64,8 +75,8 @@ def pretrain_lejepa_encoder():
     probe = nn.Sequential(
         nn.LayerNorm(globals.EMBEDDING_DIM),
         nn.Linear(globals.EMBEDDING_DIM, 1),
-    ).to(DEVICE)
-    sigreg = SigReg().to(DEVICE)
+    ).to(device)
+    sigreg = SigReg().to(device)
 
     g1 = {
         "params": raw_encoder.parameters(),
@@ -94,11 +105,11 @@ def pretrain_lejepa_encoder():
         "epoch_seconds": [],
     }
 
-    scaler = GradScaler(enabled=(DEVICE.type == "cuda"))
+    scaler = GradScaler(enabled=(device.type == "cuda"))
 
     start_epoch = 0
-    if RESUME and CHECKPOINT_PATH.exists():
-        ckpt = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+    if resume and checkpoint_path.exists():
+        ckpt = torch.load(checkpoint_path, map_location=device)
         raw_encoder.load_state_dict(ckpt["model_state"])
         opt.load_state_dict(ckpt["optimizer_state"])
         scheduler.load_state_dict(ckpt["scheduler_state"])
@@ -117,14 +128,14 @@ def pretrain_lejepa_encoder():
             torch.mps.set_rng_state(rng["mps"].cpu())
 
 
-        logger.warn(f"resumed from {CHECKPOINT_PATH} at epoch #{start_epoch}")
+        logger.warn(f"resumed from {checkpoint_path} at epoch #{start_epoch + 1}")
 
     # optimization strategies
-    if DEVICE.type == "cuda":
+    if device.type == "cuda":
         logger.info("Enabling torch.compile for CUDA")
         encoder = torch.compile(raw_encoder)
     else:
-        logger.warn(f"torch.compile is not supported/stable on {DEVICE.type}, skipping")
+        logger.warn(f"torch.compile is not supported/stable on {device.type}, skipping")
         encoder = raw_encoder
 
     for epoch in range(start_epoch, globals.PRETRAIN_EPOCHS):
@@ -142,8 +153,8 @@ def pretrain_lejepa_encoder():
         for views, y in tqdm(train, total=len(train), position=0, leave=True):
             opt.zero_grad(set_to_none=True)
 
-            with torch.autocast(DEVICE.type, dtype=torch.bfloat16): # bfloat16 is numerically more stable than float16
-                views = views.to(DEVICE, non_blocking=True)
+            with torch.autocast(device.type, dtype=torch.bfloat16): # bfloat16 is numerically more stable than float16
+                views = views.to(device, non_blocking=True)
                 emb, proj, _ = encoder(views)
 
                 proj_mean = proj.mean(0)
@@ -154,7 +165,7 @@ def pretrain_lejepa_encoder():
             # probe in fp32, on detached embeddings: gradients flow only into
             # the probe head, and the target is mean depth normalized by the
             # 10 m (1000 cm) range
-            y_rep = y.to(DEVICE, non_blocking=True).float().repeat_interleave(globals.VIEWS) / 1000.0
+            y_rep = y.to(device, non_blocking=True).float().repeat_interleave(globals.VIEWS) / 1000.0
             yhat = probe(emb.detach().float()).squeeze(-1)
             probe_loss = F.mse_loss(yhat, y_rep)
 
@@ -185,9 +196,9 @@ def pretrain_lejepa_encoder():
         probe_ss_tot = probe_y_sq - probe_y_sum**2 / max(probe_count, 1)
         probe_r2 = 1.0 - probe_ss_res / max(probe_ss_tot, 1e-12)
 
-        logger.info(f"[{epoch}/{globals.PRETRAIN_EPOCHS}] pretrain/lejepa {epoch_lejepa / len(train)}")
-        logger.info(f"[{epoch}/{globals.PRETRAIN_EPOCHS}] pretrain/sigreg {epoch_sigreg / len(train)}")
-        logger.info(f"[{epoch}/{globals.PRETRAIN_EPOCHS}] pretrain/probe_r2 {probe_r2:.4f}")
+        logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/lejepa {epoch_lejepa / len(train)}")
+        logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/sigreg {epoch_sigreg / len(train)}")
+        logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/probe_r2 {probe_r2:.4f}")
 
         history["sigreg_loss"].append(epoch_sigreg / len(train))
         history["inv_loss"].append(epoch_inv / len(train))
@@ -214,31 +225,29 @@ def pretrain_lejepa_encoder():
         }
 
         # to avoid risk of corrupting the previous checkpoint file
-        temp_path = CHECKPOINT_PATH.with_suffix(".tmp")
+        temp_path = checkpoint_path.with_suffix(".tmp")
         torch.save(checkpoint, temp_path)
-        temp_path.replace(CHECKPOINT_PATH)
+        temp_path.replace(checkpoint_path)
 
         if (epoch + 1) % SNAPSHOT_EVERY == 0 or epoch + 1 == globals.PRETRAIN_EPOCHS:
-            snapshot_path = OUTPUT_DIR / f"encoder_epoch_{epoch + 1:03d}.pt"
+            snapshot_path = output_dir / f"encoder_epoch_{epoch + 1:03d}.pt"
             torch.save({"epoch": epoch, "model_state": raw_encoder.state_dict()}, snapshot_path)
             logger.info(f"saved encoder snapshot to {snapshot_path}")
 
         # dumped every epoch so a crash never loses the chart data
-        with open(OUTPUT_DIR / "losses.json", "w") as losses_file:
+        with open(output_dir / "losses.json", "w") as losses_file:
             json.dump(history, losses_file)
 
 
 def main():
-    pretrain_lejepa_encoder()
-
-    # todo list pretraining
-    # [x] add checkpoints
-    # [ ] track loss across epochs to build charts loss vs epochs
-
-    # todo list training
-    # [ ] track loss across epochs to build charts loss vs epochs
-    # [ ] track accuracy on test set over epochs to build chart accuracy vs epochs
-
+    args = parse_cli_args()
+    pretrain_lejepa_encoder(
+        run_name=args.name,
+        config=args.config,
+        resume=args.resume,
+        arch=args.arch,
+        dataset=args.dataset
+    )
 
 if __name__ == "__main__":
     raise SystemExit(main())
