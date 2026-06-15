@@ -58,13 +58,11 @@ def pretrain_lejepa_encoder():
         persistent_workers=True,
     )
 
-    # nonlinear diagnostic probe: regresses the (normalized) mean scene depth
+    # linear diagnostic probe: regresses the (normalized) mean scene depth
     # from the detached embedding. It never influences the encoder; its
     # per-epoch R2 tracks how much depth information the embedding carries.
     probe = nn.Sequential(
         nn.LayerNorm(globals.EMBEDDING_DIM),
-        nn.Linear(globals.EMBEDDING_DIM, globals.EMBEDDING_DIM),
-        nn.GELU(),
         nn.Linear(globals.EMBEDDING_DIM, 1),
     ).to(DEVICE)
     sigreg = SigReg().to(DEVICE)
