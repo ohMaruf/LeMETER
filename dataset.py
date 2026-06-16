@@ -163,7 +163,7 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         if self.views > 1:
             # each view gets its own crop: spatial invariance is the main
             # signal LeJEPA learns from, photometric jitter alone is too weak
-            return torch.stack([self.view_aug(image) for _ in range(self.views)]), mean_depth_cm
+            return torch.stack([self.view_aug(image) for _ in range(self.views - 1)] + [image]), mean_depth_cm
 
         return self.test(image), mean_depth_cm
 
