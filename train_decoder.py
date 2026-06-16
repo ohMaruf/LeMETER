@@ -1,3 +1,4 @@
+import json
 from cli import parse_cli_args
 from dataset import DepthDataset, DepthTrainDataset
 import math
@@ -24,10 +25,10 @@ RUNS_DIR = Path("runs")
 # the pretrained features are refined rather than overwritten
 ENCODER_LR = globals.LEARNING_RATE / 10
 DECODER_BATCH_SIZE = 128
-DECODER_EPOCHS = 60
+DECODER_EPOCHS = 20
 # METER paper: AdamW with weight decay 0.01, LR decayed x0.1 every 20 epochs
 WEIGHT_DECAY = 1e-2
-LR_DECAY_EVERY = 20
+LR_DECAY_EVERY = 5
 LR_DECAY_GAMMA = 0.1
 
 
@@ -248,6 +249,9 @@ def train_decoder(
         if is_best:
             torch.save(checkpoint, best_checkpoint_path)
 
+        # dumped every epoch so a crash never loses the chart data
+        with open(output_dir / "losses.json", "w") as losses_file:
+            json.dump(history, losses_file)
 
 def main():
     args = parse_cli_args()
