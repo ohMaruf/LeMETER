@@ -218,6 +218,7 @@ def pretrain_lejepa_encoder(
         proj_sigma = proj_var.mean().sqrt().item()
 
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/lejepa {epoch_lejepa / len(train)}")
+        logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/invariance {epoch_inv / len(train)}")
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/sigreg {epoch_sigreg / len(train)}")
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/probe_r2 {probe_r2:.4f}")
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/proj_sigma {proj_sigma:.4f} (target 1.0)")
