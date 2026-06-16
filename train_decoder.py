@@ -87,7 +87,7 @@ def train_decoder(
         freeze_encoder: bool = True,
         checkpoint_epoch: int = globals.PRETRAIN_EPOCHS,
 ):
-    output_dir = RUNS_DIR / f"{dataset}_{arch}_{run_name}_decoder_{"frozen" if freeze_encoder else "finetune"}"
+    output_dir = RUNS_DIR / f"{dataset}_{arch}_{run_name}_decoder_{'frozen' if freeze_encoder else 'finetune'}"
     checkpoint_path = output_dir / "last_checkpoint.pt"
     best_checkpoint_path = output_dir / "best_checkpoint.pt"
     input_dir = RUNS_DIR / f"{dataset}_{arch}_{run_name}_encoder"
