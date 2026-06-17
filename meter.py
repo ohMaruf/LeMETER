@@ -1,8 +1,10 @@
+from derf import convert_ln_to_derf
 import torch
 import torch.nn as nn
 from torchvision.ops import MLP
 from einops import rearrange
 from typing import Literal
+from pathlib import Path
 
 from globals import FLOATING_PRECISION, PROJ_DIM, EMBEDDING_DIM, INPUT_RESOLUTION
 
@@ -415,9 +417,8 @@ class Meter(nn.Module):
     @staticmethod
     def load(device: torch.device, dataset: Literal["nyu", "kitti"] = "nyu", arch: MeterArchitecture = "xxs") -> "Meter":
         model = Meter(device, arch)
-        state_dict = torch.load(
-            f"meter-models/build_model_best_{dataset}_{arch}", map_location=device
-        )
+        model_path = Path(__file__).parent / "meter-models" / f"build_model_best_{dataset}_{arch}"
+        state_dict = torch.load(model_path, map_location=device)
         model.load_state_dict(state_dict)
         model.to(device)
         model.eval()
@@ -460,3 +461,14 @@ class LeMeter(nn.Module):
         x = x.flatten(0, 1)
         x, proj, skip_connections = self.encoder(x)
         return self.decoder(x, skip_connections)
+
+
+class GaussianMeter(Meter):
+    def __init__(self, device: torch.device, arch: MeterArchitecture, enable_derf: bool = False, enable_gelu: bool = False):
+        super().__init__(device, arch)
+        if enable_derf:
+            convert_ln_to_derf(self.encoder)
+            convert_ln_to_derf(self.decoder)
+        if enable_gelu:
+            convert_relu_to_gelu(self.encoder)
+            convert_relu_to_gelu(self.decoder)

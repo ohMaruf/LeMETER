@@ -1,9 +1,10 @@
+from typing import Literal
 import torch
 import torch.nn as nn
 from timm.layers import LayerNorm2d
 
 
-class Dynamic_erf(nn.Module):
+class DynamicErf(nn.Module):
     def __init__(self, normalized_shape, channels_last: bool, alpha_init_value=0.5, shift_init_value=0.0):
         super().__init__()
         self.normalized_shape = normalized_shape
@@ -29,11 +30,24 @@ class Dynamic_erf(nn.Module):
         return f"normalized_shape={self.normalized_shape}, alpha_init_value={self.alpha_init_value}, shift_init_value={self.shift_init_value}, channels_last={self.channels_last}"
 
 
-def convert_ln_to_derf(module, alpha_init_value=0.5, shift_init_value=0.0):
+def convert_ln_to_derf(module: nn.Module, alpha_init_value=0.5, shift_init_value=0.0):
     module_output = module
     if isinstance(module, nn.LayerNorm):
-        module_output = Dynamic_erf(module.normalized_shape, not isinstance(module, LayerNorm2d), alpha_init_value, shift_init_value)
+        module_output = DynamicErf(module.normalized_shape, not isinstance(module, LayerNorm2d), alpha_init_value, shift_init_value)
     for name, child in module.named_children():
         module_output.add_module(name, convert_ln_to_derf(child, alpha_init_value, shift_init_value))
+    del module
+    return module_output
+
+
+def convert_relu_to_gelu(module: nn.Module, approximate: Literal["tanh", "none"] = "tanh"):
+    module_output = module
+    if isinstance(module, nn.ReLU):
+        module_output = nn.GELU(approximate=approximate)
+    for name, child in module.named_children():
+        module_output.add_module(
+            name,
+            convert_relu_to_gelu(child),
+        )
     del module
     return module_output

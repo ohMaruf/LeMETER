@@ -190,14 +190,6 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
 
 
 class DepthTrainDataset(NormalizedNyuDataset):
-    """Image + depth target at decoder resolution, in centimeters (the canonical
-    on-disk unit; the dataset never rescales it). The paired augmentation (see
-    augmentation.PairedDepthAugmentation) applies the chosen policy jointly to
-    image and depth; the default "meter" policy is horizontal mirror, RGB channel
-    swap, joint random crop, and the shifting strategy (gamma / brightness /
-    color jitter + depth shift), each at p=0.5.
-    """
-
     def __init__(self, split, augment: bool, augmentation: AugmentationPolicy = "meter"):
         super().__init__(split)
         self.augment = augment
@@ -206,7 +198,6 @@ class DepthTrainDataset(NormalizedNyuDataset):
     def __getitem__(self, index):
         sample = self.samples.iloc[index]
         image = self._load_image_tensor(self._resolve_sample_path(sample["image_path"]))
-        # depth is uint16 centimeters on disk; consumers convert units, not us
         depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"]))
 
         if self.augment:
