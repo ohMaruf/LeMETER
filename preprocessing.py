@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import shutil
+import numpy as np
 import torch
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from torchvision.transforms.functional import to_tensor, to_pil_image
@@ -11,6 +12,12 @@ from tqdm import tqdm
 
 import logger
 from globals import INPUT_RESOLUTION, NYU_IMAGE_RESOLUTION
+
+# canonical preprocessed depth: uint16 centimeters for every split, matching the
+# unit the Meter model predicts in. The source NYU train maps are uint8
+# (255 == 10 m); the test maps are uint16 millimeters.
+UINT8_DEPTH_TO_CM = 1000.0 / 255.0
+MM_TO_CM = 0.1
 
 NYU_DATASET_NAME = "nyu-depth-v2"
 NYU_DATASET_ROOT = Path("datasets/nyu_data")
@@ -99,6 +106,30 @@ def save_image_tensor(image: torch.Tensor, destination_path: Path) -> None:
     raise ValueError(f"Unsupported image format: {destination_path.suffix}")
 
 
+def save_depth_as_cm(source_depth_path: Path, destination_path: Path) -> None:
+    """Write the depth map as uint16 centimeters, the single canonical unit (the
+    one the Meter model predicts in). Train maps arrive as uint8 (255 == 10 m)
+    and test maps as uint16 millimeters; both are rescaled to cm. Resolution is
+    preserved (depth is never resized)."""
+    _ensure_dir(destination_path.parent)
+    with Image.open(source_depth_path) as depth:
+        array = np.asarray(depth)
+
+    if array.dtype == np.uint8:
+        # train: uint8 with 255 == 10 m -> centimeters
+        array = np.rint(array.astype(np.float64) * UINT8_DEPTH_TO_CM)
+    elif array.dtype == np.uint16:
+        # test: uint16 millimeters -> centimeters
+        array = np.rint(array.astype(np.float64) * MM_TO_CM)
+    else:
+        raise ValueError(
+            f"Unexpected depth dtype {array.dtype} for {source_depth_path}; "
+            "expected uint8 (train) or uint16 (test)"
+        )
+
+    Image.fromarray(array.astype(np.uint16)).save(destination_path)
+
+
 def load_manifest_rows(csv_path: Path) -> list[ManifestRow]:
     with csv_path.open(newline="", encoding="utf-8") as handle:
         return [tuple(row[:2]) for row in csv.reader(handle) if row]
@@ -153,7 +184,7 @@ def preprocess_nyu_pair(
             raise ValueError(f"Unsupported image format: {target_image_path.suffix}")
 
         resized_tensor = to_tensor(resized) * 255
-    copy_with_parents(source_depth_path, target_depth_path)
+    save_depth_as_cm(source_depth_path, target_depth_path)
     return resized_tensor
 
 

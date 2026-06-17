@@ -66,12 +66,12 @@ def evaluate(model: Meter, loader: DataLoader, device: torch.device) -> dict[str
     count = 0
     for item in loader:
         x = item["image"].to(device)
-        y = item["depth"].to(device).float()  # test labels: millimeters, full res
+        y = item["depth"].to(device).float()  # labels: centimeters, full res
         z = run_inference(model, x)
         for index in range(x.shape[0]):
             yi, zi = y[index], z[index]
             mask = valid_depth_mask(yi, zi)
-            totals["rmse"] += rmse(yi, zi, mask) / 1000.0  # millimeters -> meters
+            totals["rmse"] += rmse(yi, zi, mask) / 100.0  # centimeters -> meters
             totals["rel"] += rel(yi, zi, mask)
             totals["delta1"] += delta1(yi, zi, mask)
             count += 1
@@ -109,8 +109,8 @@ def train_decoder(
         prefetch_factor=2,
         persistent_workers=True,
     )
-    test = DataLoader(
-        NormalizedNyuDataset("test"),
+    val = DataLoader(
+        NormalizedNyuDataset("val"),
         batch_size=16,
         shuffle=False,
         num_workers=min(globals.DATALOADER_WORKERS, os.cpu_count() or 1),
@@ -212,10 +212,10 @@ def train_decoder(
         scheduler.step()
 
         train_loss = epoch_loss / len(train)
-        metrics = evaluate(raw_model, test, device)
-        logger.info(f"[{epoch}/{DECODER_EPOCHS}] test/RMSE {metrics['rmse']:.3f}m")
-        logger.info(f"[{epoch}/{DECODER_EPOCHS}] test/REL {metrics['rel']:.3f}")
-        logger.info(f"[{epoch}/{DECODER_EPOCHS}] test/d1 {metrics['delta1']:.3f}")
+        metrics = evaluate(raw_model, val, device)
+        logger.info(f"[{epoch}/{DECODER_EPOCHS}] val/RMSE {metrics['rmse']:.3f}m")
+        logger.info(f"[{epoch}/{DECODER_EPOCHS}] val/REL {metrics['rel']:.3f}")
+        logger.info(f"[{epoch}/{DECODER_EPOCHS}] val/d1 {metrics['delta1']:.3f}")
 
         history["train_loss"].append(train_loss)
         for component, total in epoch_components.items():

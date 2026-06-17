@@ -72,9 +72,8 @@ def synchronize_device(device: torch.device) -> None:
 
 @torch.no_grad()
 def run_inference(model: nn.Module, x: Tensor) -> Tensor:
-    # model produces depth in centimeters, but label is in millimeters
-    z = model(x)
-    z = z.float() * 10  # convert centimeters to millimeters
+    # model and labels are both in centimeters: no unit conversion needed
+    z = model(x).float()
     return TF.interpolate(
         z,
         size=globals.NYU_IMAGE_RESOLUTION,
@@ -108,8 +107,8 @@ def benchmark_accuracy(
 
     valid_items = len(test_dataset)
 
-    # factor 1000, because we want RMSE in meters, not millimeters
-    logger.info(f"RMSE = {total_rmse / (1000 * valid_items):.3f}")
+    # factor 100, because we want RMSE in meters, not centimeters
+    logger.info(f"RMSE = {total_rmse / (100 * valid_items):.3f}")
     logger.info(f"REL = {total_rel / valid_items:.3f}")
     logger.info(f"δ1 = {total_delta1 / valid_items:.3f}")
 

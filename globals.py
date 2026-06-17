@@ -2,6 +2,7 @@ import torch
 
 NYU_IMAGE_RESOLUTION = (480, 640)  # height, width (rows x columns notation)
 INPUT_RESOLUTION = (192, 256)  # height, width (rows x columns notation)
+OUTPUT_RESOLUTION = (INPUT_RESOLUTION[0] // 4, INPUT_RESOLUTION[1] // 4)
 
 SEED = 3407
 
@@ -21,10 +22,3 @@ LEARNING_RATE = 1e-3
 PRETRAIN_EPOCHS = 20
 LAMBDA = 5e-2
 VIEWS = 8
-
-# unit convention (validated against the published METER numbers): the model
-# works in centimeters — eval.run_inference multiplies its output by 10 to get
-# the millimeters of the test labels, and loss.py's ssim(val_range=1000)
-# assumes targets in [0, 1000]. Train depth maps are uint8 with 255 == 10 m.
-TRAIN_DEPTH_TO_CM = 1000.0 / 255.0
-OUTPUT_RESOLUTION = (INPUT_RESOLUTION[0] // 4, INPUT_RESOLUTION[1] // 4)

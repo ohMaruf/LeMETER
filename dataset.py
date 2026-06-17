@@ -1,12 +1,13 @@
 import json
+import random
 import torch
 import torch.nn.functional as F
 import pandas as pd
 from globals import (
     FLOATING_PRECISION,
     INPUT_RESOLUTION,
-    TRAIN_DEPTH_TO_CM,
     OUTPUT_RESOLUTION,
+    SEED,
 )
 from torchvision.transforms import v2
 from torchvision.transforms import functional as TF
@@ -21,6 +22,21 @@ import logger
 from augmentation import AugmentationPolicy, ViewAugmentation, PairedDepthAugmentation
 
 DepthDataset = Literal["nyu", "kitti"]
+Split = Literal["train", "val", "test"]
+
+VAL_SCENE_FRACTION = 0.05
+
+
+def _partition_train_scenes(samples: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    scenes = samples["image_path"].map(lambda path: str(Path(path).parent))
+    unique_scenes = sorted(scenes.unique())
+    n_val = max(1, round(len(unique_scenes) * VAL_SCENE_FRACTION))
+    val_scenes = set(random.Random(SEED).sample(unique_scenes, n_val))
+
+    is_val = scenes.isin(val_scenes)
+    train_df = samples[~is_val].reset_index(drop=True)
+    val_df = samples[is_val].reset_index(drop=True)
+    return train_df, val_df
 
 
 class NormalizedNyuDataset(Dataset):
@@ -31,13 +47,15 @@ class NormalizedNyuDataset(Dataset):
 
     def __init__(
         self,
-        split: Literal["train", "test"],
+        split: Split,
+        holdout_val: bool = True,
     ) -> None:
         super().__init__()
-        self.samples = self._load_split(split)
+        self.split = split
+        self.samples = self._load_split(split, holdout_val)
         self.zscore_normalize = v2.Normalize(*self._load_normalization_stats())
 
-    def _load_split(self, split: Literal["train", "test"]) -> pd.DataFrame:
+    def _load_split(self, split: Split, holdout_val: bool = True) -> pd.DataFrame:
         if not self.root.exists():
             raise FileNotFoundError(f"Dataset root does not exist: {self.root}")
 
@@ -56,7 +74,11 @@ class NormalizedNyuDataset(Dataset):
         if split == "test":
             return pd.read_csv(test_manifest_path, names=["image_path", "depth_path"], header=None)
 
-        return pd.read_csv(train_manifest_path, names=["image_path", "depth_path"], header=None)
+        train_manifest = pd.read_csv(train_manifest_path, names=["image_path", "depth_path"], header=None)
+        train_scenes, val_scenes = _partition_train_scenes(train_manifest)
+        if split == "val":
+            return val_scenes
+        return train_scenes if holdout_val else train_manifest
 
     def _load_normalization_stats(self) -> tuple[tuple[float, ...], tuple[float, ...]]:
         stats_path = self.root / self.stats_rel
@@ -108,11 +130,11 @@ class NormalizedNyuDataset(Dataset):
 class AugmentedNyuDataset(NormalizedNyuDataset):
     def __init__(
         self,
-        split: Literal["train", "test"],
+        split: Split,
         views=1,
         augmentation: AugmentationPolicy = "lejepa",
     ) -> None:
-        super().__init__(split)
+        super().__init__(split, holdout_val=False)
 
         self.views = views
         self.augmentation = augmentation
@@ -134,19 +156,17 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         )
 
     def _load_mean_depth_cache(self, split: Literal["train", "test"]) -> Tensor:
-        """Per-image mean depth in cm, aligned with the manifest order.
+        """Per-image mean depth in centimeters, aligned with the manifest order.
         Built once, then loaded from disk."""
         cache_path = self.root / f"mean_depth_cm_{split}.pt"
         if cache_path.exists():
             return torch.load(cache_path)
 
         logger.info(f"building mean-depth cache for split '{split}' (one-time)")
-        # train depth PNGs are uint8 (255 == 10 m), test PNGs are uint16 mm
-        scale = TRAIN_DEPTH_TO_CM if split == "train" else 0.1
         means = torch.empty(len(self.samples))
         for index in tqdm(range(len(self.samples)), desc="mean depth"):
             depth_path = self._resolve_sample_path(self.samples.iloc[index]["depth_path"])
-            means[index] = self._load_depth_tensor(depth_path).mean() * scale
+            means[index] = self._load_depth_tensor(depth_path).mean()
 
         torch.save(means, cache_path)
         logger.info(f"wrote {cache_path}")
@@ -170,11 +190,12 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
 
 
 class DepthTrainDataset(NormalizedNyuDataset):
-    """Image + depth target at decoder resolution, in cm. The paired
-    augmentation (see augmentation.PairedDepthAugmentation) applies the chosen
-    policy jointly to image and depth; the default "meter" policy is horizontal
-    mirror, RGB channel swap, joint random crop, and the shifting strategy
-    (gamma / brightness / color jitter + depth shift), each at p=0.5.
+    """Image + depth target at decoder resolution, in centimeters (the canonical
+    on-disk unit; the dataset never rescales it). The paired augmentation (see
+    augmentation.PairedDepthAugmentation) applies the chosen policy jointly to
+    image and depth; the default "meter" policy is horizontal mirror, RGB channel
+    swap, joint random crop, and the shifting strategy (gamma / brightness /
+    color jitter + depth shift), each at p=0.5.
     """
 
     def __init__(self, split, augment: bool, augmentation: AugmentationPolicy = "meter"):
@@ -185,7 +206,8 @@ class DepthTrainDataset(NormalizedNyuDataset):
     def __getitem__(self, index):
         sample = self.samples.iloc[index]
         image = self._load_image_tensor(self._resolve_sample_path(sample["image_path"]))
-        depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"])) * TRAIN_DEPTH_TO_CM
+        # depth is uint16 centimeters on disk; consumers convert units, not us
+        depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"]))
 
         if self.augment:
             image, depth = self.aug(image, depth)
