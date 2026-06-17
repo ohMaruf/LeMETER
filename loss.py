@@ -108,6 +108,6 @@ class balanced_loss_function(nn.Module):
 
         loss_ssim = (1 - ssim(output, depth, val_range=1000.0)) * self.lambda_3
 
-        loss_grad = (loss_dx + loss_dy) / self.lambda_1
+        loss_grad = (loss_dx + loss_dy) * self.lambda_1
 
         return loss_depth, loss_ssim, loss_normal, loss_grad
