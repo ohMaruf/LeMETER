@@ -25,7 +25,8 @@ RUNS_DIR = Path("runs")
 BATCH_SIZE = 128
 EPOCHS = 60
 
-LR_DECAY_EVERY = 10
+LEARNING_RATE = 1e-3
+LR_DECAY_EVERY = 20
 LR_DECAY_GAMMA = 0.1
 WEIGHT_DECAY = 1e-2
 
@@ -94,7 +95,7 @@ def train_supervised(
     train, val, test = get_dataloaders()
     raw_model = GaussianMeter(device, arch, enable_derf=enable_derf, enable_gelu=enable_gelu).to(device)
 
-    param_groups = [{"params": raw_model.parameters(), "lr": globals.LEARNING_RATE}]
+    param_groups = [{"params": raw_model.parameters(), "lr": LEARNING_RATE}]
     opt = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=WEIGHT_DECAY)
     scheduler = StepLR(opt, step_size=LR_DECAY_EVERY, gamma=LR_DECAY_GAMMA)
     scaler = GradScaler(enabled=(device.type == "cuda"))
