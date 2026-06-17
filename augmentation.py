@@ -16,7 +16,8 @@ Three view-generation policies, selected by name:
 Design principles (inherited from the draft):
   - APPEARANCE is aggressive: depth is invariant to color / brightness / blur.
   - SPATIAL is moderate: depth IS sensitive to location, so no wild crops.
-  - NO vertical flip: ceiling/floor structure is meaningful for depth.
+  - The METER policy mirrors AND vertical-flips (as in the paper); the lejepa
+    policy keeps the original DINO crops + horizontal flip only.
   - depth-scale shift requires labels, so it only runs in the paired path.
 """
 
@@ -57,6 +58,7 @@ LEJEPA = {
 
 METER = {
     "mirror": 0.5,
+    "vertical_flip": 0.5,
     "c_swap": 0.5,
     "random_crop": 0.5,
     "random_crop_scale": (0.6, 1.0),
@@ -149,6 +151,7 @@ class ViewAugmentation:
                     ),
                 ], p=cfg["random_crop"]),
                 v2.RandomHorizontalFlip(p=cfg["mirror"]),
+                v2.RandomVerticalFlip(p=cfg["vertical_flip"]),
             ])
             self.appearance = None
         else:
@@ -285,6 +288,11 @@ class PairedDepthAugmentation:
         if torch.rand(()) < cfg["mirror"]:
             image = torch.flip(image, dims=[-1])
             depth_cm = torch.flip(depth_cm, dims=[-1])
+
+        # vertical flip on the height axis, applied jointly to image and depth
+        if torch.rand(()) < cfg["vertical_flip"]:
+            image = torch.flip(image, dims=[-2])
+            depth_cm = torch.flip(depth_cm, dims=[-2])
 
         # channel swap affects colour only; the depth target is untouched
         if torch.rand(()) < cfg["c_swap"]:
