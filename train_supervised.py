@@ -14,10 +14,10 @@ from tqdm import tqdm
 
 import globals
 import logger
-from eval import delta1, rmse, valid_depth_mask, run_inference, rel
+from eval import evaluate
 from loss import balanced_loss_function
 from hardware_acceleration import enable_hardware_acceleration, Config
-from meter import Meter, GaussianMeter
+from meter import GaussianMeter
 from dataset import NormalizedNyuDataset, DepthTrainDataset
 
 RUNS_DIR = Path("runs")
@@ -31,28 +31,9 @@ LR_DECAY_GAMMA = 0.1
 WEIGHT_DECAY = 1e-2
 
 
-@torch.no_grad()
-def evaluate(model: Meter, loader: DataLoader, device: torch.device) -> dict[str, float]:
-    model.eval()
-    totals = {"rmse": 0.0, "rel": 0.0, "delta1": 0.0}
-    count = 0
-    for item in loader:
-        x = item["image"].to(device)
-        y = item["depth"].to(device).float()  # labels: centimeters, full res
-        z = run_inference(model, x)
-        for index in range(x.shape[0]):
-            yi, zi = y[index], z[index]
-            mask = valid_depth_mask(yi, zi)
-            totals["rmse"] += rmse(yi, zi, mask) / 100.0  # centimeters -> meters
-            totals["rel"] += rel(yi, zi, mask)
-            totals["delta1"] += delta1(yi, zi, mask)
-            count += 1
-    return {key: value / count for key, value in totals.items()}
-
-
 def get_dataloaders() -> tuple[DataLoader, DataLoader, DataLoader]:
     train = DataLoader(
-        DepthTrainDataset("train", augment=True),
+        DepthTrainDataset("train", augment=True, augmentation="meter", normalization="imagenet"),
         batch_size=BATCH_SIZE,
         shuffle=True,
         drop_last=True,
@@ -61,13 +42,13 @@ def get_dataloaders() -> tuple[DataLoader, DataLoader, DataLoader]:
         persistent_workers=True,
     )
     val = DataLoader(
-        NormalizedNyuDataset("val"),
+        NormalizedNyuDataset("val", normalization="imagenet"),
         batch_size=16,
         shuffle=False,
         num_workers=min(globals.DATALOADER_WORKERS, os.cpu_count() or 1),
     )
     test = DataLoader(
-        NormalizedNyuDataset("test"),
+        NormalizedNyuDataset("test", normalization="imagenet"),
         batch_size=16,
         shuffle=False,
         num_workers=min(globals.DATALOADER_WORKERS, os.cpu_count() or 1),
@@ -108,6 +89,7 @@ def train_supervised(
         "loss_normal": [],
         "loss_grad": [],
         "rmse": [],
+        "mrmse": [],
         "rel": [],
         "delta1": [],
         "lr": [],
@@ -188,7 +170,8 @@ def train_supervised(
         # select on val only; the test set is held out for the final report
         metrics = evaluate(raw_model, val, device)
         logger.info(f"[{epoch}/{EPOCHS}] train/loss {train_loss:.4f}")
-        logger.info(f"[{epoch}/{EPOCHS}] val/RMSE {metrics['rmse']:.3f}m")
+        logger.info(f"[{epoch}/{EPOCHS}] val/RMSE  {metrics['rmse']:.3f}m")
+        logger.info(f"[{epoch}/{EPOCHS}] val/MRMSE {metrics['mrmse']:.3f}m")
         logger.info(f"[{epoch}/{EPOCHS}] val/REL {metrics['rel']:.3f}")
         logger.info(f"[{epoch}/{EPOCHS}] val/d1 {metrics['delta1']:.3f}")
 
@@ -196,12 +179,13 @@ def train_supervised(
         for component, total in epoch_components.items():
             history[component].append(total / len(train))
         history["rmse"].append(metrics["rmse"])
+        history["mrmse"].append(metrics["mrmse"])
         history["rel"].append(metrics["rel"])
         history["delta1"].append(metrics["delta1"])
         history["lr"].append(scheduler.get_last_lr()[0])
 
-        is_best = metrics["rmse"] < best_val_rmse
-        best_val_rmse = min(best_val_rmse, metrics["rmse"])
+        is_best = metrics["mrmse"] < best_val_rmse
+        best_val_rmse = min(best_val_rmse, metrics["mrmse"])
 
         checkpoint = {
             "epoch": epoch,
@@ -238,7 +222,8 @@ def train_supervised(
         logger.info(f"loaded best checkpoint (epoch {best_ckpt['epoch']}) for test eval")
 
     test_metrics = evaluate(raw_model, test, device)
-    logger.info(f"[final] test/RMSE {test_metrics['rmse']:.3f}m")
+    logger.info(f"[final] test/RMSE  {test_metrics['rmse']:.3f}m")
+    logger.info(f"[final] test/MRMSE {test_metrics['mrmse']:.3f}m")
     logger.info(f"[final] test/REL {test_metrics['rel']:.3f}")
     logger.info(f"[final] test/d1 {test_metrics['delta1']:.3f}")
 

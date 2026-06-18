@@ -49,11 +49,15 @@ class NormalizedNyuDataset(Dataset):
         self,
         split: Split,
         holdout_val: bool = True,
+        normalization: Literal["imagenet", "dataset"] = "dataset",
     ) -> None:
         super().__init__()
         self.split = split
         self.samples = self._load_split(split, holdout_val)
-        self.zscore_normalize = v2.Normalize(*self._load_normalization_stats())
+        if normalization == "imagenet":
+            self.zscore_normalize = v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        else:
+            self.zscore_normalize = v2.Normalize(*self._load_normalization_stats())
 
     def _load_split(self, split: Split, holdout_val: bool = True) -> pd.DataFrame:
         if not self.root.exists():
@@ -133,8 +137,9 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         split: Split,
         views=1,
         augmentation: AugmentationPolicy = "lejepa",
+        normalization: Literal["imagenet", "dataset"] = "dataset",
     ) -> None:
-        super().__init__(split, holdout_val=False)
+        super().__init__(split, holdout_val=False, normalization=normalization)
 
         self.views = views
         self.augmentation = augmentation
@@ -190,8 +195,8 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
 
 
 class DepthTrainDataset(NormalizedNyuDataset):
-    def __init__(self, split, augment: bool, augmentation: AugmentationPolicy = "meter"):
-        super().__init__(split)
+    def __init__(self, split, augment: bool, augmentation: AugmentationPolicy = "meter", normalization: Literal["imagenet", "dataset"] = "dataset"):
+        super().__init__(split, normalization=normalization, holdout_val=True)
         self.augment = augment
         self.aug = PairedDepthAugmentation(augmentation)
 

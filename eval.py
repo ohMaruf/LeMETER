@@ -1,4 +1,5 @@
 import time
+import math
 
 import torch
 import torch.nn as nn
@@ -110,35 +111,57 @@ def run_inference(model: nn.Module, x: Tensor) -> Tensor:
         align_corners=False,
     )
 
-
 @torch.no_grad()
-def benchmark_accuracy(
-    model: nn.Module,
-    dataset: NormalizedNyuDataset,
-    device: torch.device,
-) -> None:
-    model.to(device)
-    model.eval()
+def benchmark_accuracy(model, dataset, device):
+    model.to(device).eval()
 
-    total_delta1 = 0.0
-    total_rel = 0.0
-    total_rmse = 0.0
+    sum_sq_error = 0.0  # in cm^2
+    sum_abs_rel = 0.0
+    sum_delta1 = 0.0
+    sum_rmse_per_image = 0.0
+    total_pixels = 0
+    image_count = 0
 
-    test_dataset = DataLoader(dataset)
-    count = 0
-    for item in tqdm(test_dataset, total=len(test_dataset)):
+    loader = DataLoader(dataset, batch_size=1)
+    for item in tqdm(loader, total=len(loader)):
         x, y = item["image"].to(device), item["depth"].to(device).float()
-        z = run_inference(model, x)
-        for index in range(x.shape[0]):
-            metrics = depth_metrics(y[index], z[index])
-            total_rmse += metrics["rmse"]  # already in meters
-            total_rel += metrics["rel"]
-            total_delta1 += metrics["delta1"]
-            count += 1
+        z = run_inference(model, x)  # shape (1,1,H,W)
 
-    logger.info(f"test/RMSE = {total_rmse / count:.3f}")
-    logger.info(f"test/REL = {total_rel / count:.3f}")
-    logger.info(f"test/δ1 = {total_delta1 / count:.3f}")
+        gt = y[0]  # (1, H, W)
+        pred = z[0]  # (1, H, W)
+
+        mask = valid_depth_mask(gt, pred)
+        if mask.sum() == 0:
+            continue
+
+        gt_valid = gt[mask]
+        pred_valid = pred[mask].clamp(MIN_DEPTH_CM, MAX_DEPTH_CM)
+
+        n = gt_valid.numel()
+        sq_err = (gt_valid - pred_valid).square().sum().item()
+
+        # Accumulate globally (RMSE)
+        sum_sq_error += sq_err
+        total_pixels += n
+
+        # Accumulate per-image (MRMSE)
+        sum_rmse_per_image += math.sqrt(sq_err / n) / 100.0  # cm → m
+        image_count += 1
+
+        sum_abs_rel += torch.abs(pred_valid - gt_valid).div(gt_valid).sum().item()
+
+        ratio = torch.max(pred_valid / gt_valid, gt_valid / pred_valid)
+        sum_delta1 += (ratio < 1.25).sum().item()
+
+    rmse = math.sqrt(sum_sq_error / total_pixels) / 100.0  # cm → m
+    mrmse = sum_rmse_per_image / image_count
+    rel = sum_abs_rel / total_pixels
+    delta1 = sum_delta1 / total_pixels
+
+    logger.info(f"RMSE  = {rmse:.3f}")
+    logger.info(f"MRMSE = {mrmse:.3f}")
+    logger.info(f"REL   = {rel:.3f}")
+    logger.info(f"δ1    = {delta1:.3f}")
 
 
 @torch.no_grad()
@@ -182,15 +205,49 @@ def benchmark_inference(
     return fps
 
 
+@torch.no_grad()
+def evaluate(model: Meter, loader: DataLoader, device: torch.device) -> dict[str, float]:
+    model.eval()
+    totals = {"mrmse": 0.0, "rel": 0.0, "delta1": 0.0}
+    sum_sq_error = 0.0
+    total_pixels = 0
+    count = 0
+    for item in loader:
+        x = item["image"].to(device)
+        y = item["depth"].to(device).float()  # labels: centimeters, full res
+        z = run_inference(model, x)
+        for index in range(x.shape[0]):
+            # Eigen-crop + valid-range protocol; rmse comes back in meters
+            metrics = depth_metrics(y[index], z[index])
+            totals["mrmse"] += metrics["rmse"]
+            totals["rel"] += metrics["rel"]
+            totals["delta1"] += metrics["delta1"]
+            z_i = z[index].clamp(MIN_DEPTH_CM, MAX_DEPTH_CM)
+            mask = valid_depth_mask(y[index], z_i)
+            if mask.sum() > 0:
+                gt_v = y[index][mask]
+                pred_v = z_i[mask]
+                sum_sq_error += (gt_v - pred_v).square().sum().item()
+                total_pixels += gt_v.numel()
+            count += 1
+    result = {k: v / count for k, v in totals.items()}
+    result["rmse"] = math.sqrt(sum_sq_error / total_pixels) / 100.0 if total_pixels > 0 else float("nan")
+    return result
+
+
 def main():
-    dataset = NormalizedNyuDataset("test")
+    dataset = NormalizedNyuDataset("test", normalization="imagenet")
+    torch.manual_seed(globals.SEED)
     device = enable_hardware_acceleration(Config.DEFAULT)
 
-    model = Meter.load(device, "nyu", "xxs")
 
-    benchmark_accuracy(model, dataset, device)
-    benchmark_inference(model, dataset, device)
-    benchmark_inference(model, dataset, torch.device("cpu"))
+    for arch in ["xxs", "xs", "s"]:
+        model = Meter.load(device, "nyu", arch)
+        logger.info(f"METER {arch}")
+        benchmark_accuracy(model, dataset, device)
+        # benchmark_accuracy(model, dataset, device)
+        # benchmark_inference(model, dataset, device)
+        # benchmark_inference(model, dataset, torch.device("cpu"))
 
 
 if __name__ == "__main__":
