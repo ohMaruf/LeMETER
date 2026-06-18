@@ -184,8 +184,8 @@ def train_supervised(
         history["delta1"].append(metrics["delta1"])
         history["lr"].append(scheduler.get_last_lr()[0])
 
-        is_best = metrics["mrmse"] < best_val_rmse
-        best_val_rmse = min(best_val_rmse, metrics["mrmse"])
+        is_best = metrics["rmse"] < best_val_rmse
+        best_val_rmse = min(best_val_rmse, metrics["rmse"])
 
         checkpoint = {
             "epoch": epoch,
