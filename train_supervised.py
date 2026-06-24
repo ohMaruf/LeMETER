@@ -23,10 +23,10 @@ from dataset import NormalizedNyuDataset, DepthTrainDataset
 RUNS_DIR = Path("runs")
 
 BATCH_SIZE = 128
-EPOCHS = 60
+EPOCHS = 30
 
 LEARNING_RATE = 1e-3
-LR_DECAY_EVERY = 20
+LR_DECAY_EVERY = 10
 LR_DECAY_GAMMA = 0.1
 WEIGHT_DECAY = 1e-2
 
