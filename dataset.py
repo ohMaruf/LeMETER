@@ -139,18 +139,32 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         views=1,
         augmentation: AugmentationPolicy = "lejepa",
         normalization: Literal["imagenet", "dataset"] = "dataset",
+        with_depth: bool = False,
     ) -> None:
         super().__init__(split, holdout_val=False, normalization=normalization)
 
         self.views = views
         self.augmentation = augmentation
-        # scalar target for the online depth probe: flip-invariant and cached,
-        # so depth PNG decoding stays out of the training workers
-        self.mean_depth_cm = self._load_mean_depth_cache(split)
+        # when True, each view returns its own depth map with the *same* spatial
+        # transform applied, so a dense per-pixel probe trains on aligned pixels.
+        # this re-introduces per-worker depth PNG decode (the cost the scalar
+        # mean-depth cache avoids), so it is opt-in.
+        self.with_depth = with_depth
 
-        # all augmentation lives in augmentation.py; normalize is passed in so
-        # the METER channel swap / shifting strategy run on un-normalized pixels
-        self.view_aug = ViewAugmentation(augmentation, self.zscore_normalize)
+        if with_depth:
+            # PairedDepthAugmentation applies spatial ops to both image and depth
+            # and photometric ops to the image only; the resize gives every view
+            # a common base size before the (optional) crop
+            self.paired_aug = PairedDepthAugmentation(augmentation)
+            self.resize = v2.Resize(INPUT_RESOLUTION, antialias=True)
+        else:
+            # scalar target for the online depth probe: flip-invariant and cached,
+            # so depth PNG decoding stays out of the training workers
+            self.mean_depth_cm = self._load_mean_depth_cache(split)
+
+            # all augmentation lives in augmentation.py; normalize is passed in so
+            # the METER channel swap / shifting strategy run on un-normalized pixels
+            self.view_aug = ViewAugmentation(augmentation, self.zscore_normalize)
 
         self.test = v2.Compose(
             [
@@ -178,8 +192,30 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         logger.info(f"wrote {cache_path}")
         return means
 
+    def _augmented_pair(self, image_255: Tensor, depth_cm: Tensor) -> tuple[Tensor, Tensor]:
+        """One augmented view + its aligned depth: spatial transform shared,
+        photometric jitter on the image only. Image -> normalized; depth ->
+        pooled to OUTPUT_RESOLUTION (cm)."""
+        view, depth = self.paired_aug(image_255.clone(), depth_cm.clone())
+        return self._normalize_image(view), F.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)
+
     def __getitem__(self, index):
         sample = self.samples.iloc[index]
+
+        if self.with_depth:
+            image = self._load_image_tensor(self._resolve_sample_path(sample["image_path"]))  # float [0, 255]
+            depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"]))  # cm, full res
+            image = self.resize(image)  # common base size so all views stack
+
+            if self.views > 1:
+                pairs = [self._augmented_pair(image, depth) for _ in range(self.views - 1)]
+                # final view is clean (no spatial aug), depth still aligned
+                pairs.append((self._normalize_image(image), F.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)))
+                views, depths = zip(*pairs)
+                return torch.stack(views), torch.stack(depths)
+
+            return self._normalize_image(image), F.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)
+
         image = self._load_image_tensor_uint8(self._resolve_sample_path(sample["image_path"]))
 
         # the full depth map stays out of the workers (PNG decode + queue RAM);

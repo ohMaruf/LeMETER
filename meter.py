@@ -441,13 +441,14 @@ class LeMeterEncoder(nn.Module):
         x = x.flatten(0, 1)
 
         features, skip_connections = self.encoder(x)
-        emb = features[0] if isinstance(features, (tuple, list)) else features
-        if emb.dim() == 4:
-            emb = emb.mean(dim=[2, 3])
+        feat_map = features[0] if isinstance(features, (tuple, list)) else features
+        # (N*V, C, h, w) bottleneck map; pooled for the embedding, kept whole for
+        # the dense per-pixel depth probe so it sees spatial structure
+        emb = feat_map.mean(dim=[2, 3]) if feat_map.dim() == 4 else feat_map
 
         proj = self.pred(emb).reshape(N, V, -1).transpose(0, 1)
 
-        return emb, proj, skip_connections
+        return emb, proj, skip_connections, feat_map
 
 
 class LeMeter(nn.Module):
@@ -459,7 +460,7 @@ class LeMeter(nn.Module):
     def forward(self, x):
         N, V = x.shape[:2]
         x = x.flatten(0, 1)
-        x, proj, skip_connections = self.encoder(x)
+        x, proj, skip_connections, _ = self.encoder(x)
         return self.decoder(x, skip_connections)
 
 
