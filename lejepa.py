@@ -456,6 +456,7 @@ def main():
         encoder='meter',
         arch=args.arch,
         dataset=args.dataset,
+        num_samples=3
     )
 
 
