@@ -1,8 +1,11 @@
 from meter import MeterArchitecture
+from dataclasses import dataclass, asdict
 import json
 import os
 import time
 from pathlib import Path
+from typing import Literal, Dict, List, Any
+import torchvision
 
 import torch
 import torch.nn as nn
@@ -19,7 +22,7 @@ from dataset import AugmentedNyuDataset
 from hardware_acceleration import Config, enable_hardware_acceleration
 from meter import LeMeterEncoder, Meter
 from sigreg import SigReg
-from dataset import DepthDataset
+from dataset import DepthDataset, DepthTrainDataset
 
 RUNS_DIR = Path("runs")
 
@@ -263,15 +266,198 @@ def pretrain_lejepa_encoder(
             json.dump(history, losses_file)
 
 
+@dataclass
+class RunMetrics:
+    average_mutual_information: float
+    samples_size: int
+
+
+def save_pca_results(output_dir: Path, run_name: str, metrics: RunMetrics):
+    assert output_dir.exists(), "should have been created earlier"
+    results_file = output_dir / "results.json"
+
+    data: Dict[str, List[Dict[str, Any]]] = {}
+    if results_file.exists():
+        with open(results_file, "r", encoding="utf-8") as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                logger.error(f'failed to decode JSON file {results_file}')
+                return
+
+    if run_name not in data:
+        data[run_name] = []
+    data[run_name].append(asdict(metrics))
+
+    with open(results_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+
+
+def spatial_pca(features, k=3):
+    n, c, h, w = features.shape
+    x = features.view(n, c, h * w)
+
+    x_mean = x.mean(dim=-1, keepdim=True)
+    x_c = x - x_mean
+
+    cov = torch.bmm(x_c, x_c.transpose(1, 2)) / (h * w - 1)
+
+    _, eigenvectors = torch.linalg.eigh(cov)
+    eigenvectors = eigenvectors.flip(dims=(-1,))
+    top_k_v = eigenvectors[:, :, :k]
+
+    pca_features = torch.bmm(top_k_v.transpose(1, 2), x_c)
+    pca_features = pca_features.view(n, k, h, w)
+
+    pca_min = pca_features.amin(dim=(2, 3), keepdim=True)
+    pca_max = pca_features.amax(dim=(2, 3), keepdim=True)
+    pca_normalized = (pca_features - pca_min) / (pca_max - pca_min + 1e-8)
+
+    return pca_normalized
+
+
+def compute_mutual_information(
+    lhs: torch.Tensor,
+    rhs: torch.Tensor,
+    bins: int = 64
+) -> float:
+    """
+    Mutual information answers to the following question:
+    How much does the knowledge about `lhs` reduce the uncertainty about `rhs`?
+    This is arguably one of the best methods to measure the relevance of the
+    latent space with respect to the ground truth, given the fact that the two
+    may not be in a linear relationship, which something like the Pearson correlation
+    coefficient, using sobel filters would not capture.
+
+    An higher MI indicates that PCA segments reliably correspond to different depth_min
+    planes, even though their absolute values may differ a lot.
+
+    The value that we expect from the MI is [0.0..log2(bins)]
+    """
+    lhs_norm = (lhs - lhs.amin()) / (lhs.amax() - lhs.amin() + 1e-8)
+    rhs_norm = (rhs - rhs.amin()) / (rhs.amax() - rhs.amin() + 1e-8)
+
+    channels = lhs_norm.shape[1]
+    total_mutual_information = 0.0
+    for channel in range(channels):
+        lhs_channel = (lhs_norm[:, channel] * (bins - 1)).long().flatten()
+        rhs_channel = (rhs_norm[:, 0] * (bins - 1)).long().flatten()
+
+        joint_hist = torch.bincount(lhs_channel * bins + rhs_channel, minlength=bins**2).float()
+        joint_hist = joint_hist.view(bins, bins)
+
+        p_xy = joint_hist / joint_hist.sum()
+        p_x = p_xy.sum(dim=1).view(-1, 1)
+        p_y = p_xy.sum(dim=0).view(1, -1)
+
+        p_x_p_y = p_x * p_y
+        mask = (p_xy > 0) & (p_x_p_y > 0)
+
+        total_mutual_information += torch.sum(p_xy[mask] * torch.log2(p_xy[mask] / p_x_p_y[mask])).item()
+
+    return total_mutual_information / channels
+
+
+@torch.no_grad()
+def analyze_meter_latent_space(
+    model: torch.nn.Module,
+    image_tensor: torch.Tensor,
+):
+    features, _ = model.encoder(image_tensor)
+    pca_mask = spatial_pca(features, k=3)
+    return pca_mask, features
+
+
+def pca_analysis(
+    output_dir: Path,
+    config: Config = Config.DEFAULT,
+    encoder: Literal['meter', 'lemeter'] = 'meter',
+    arch: MeterArchitecture = "xxs",
+    dataset: Literal["nyu", "kitti"] = "nyu",
+    num_samples: int | None = None,
+):
+    assert dataset == "nyu", "kitti dataset not implemented yet"
+
+    run_name = f'{dataset}/{encoder}/{arch}'
+    base_dir = output_dir
+    output_dir = output_dir / run_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    device = enable_hardware_acceleration(config)
+
+    model = None
+    if encoder == 'meter':
+        model = Meter.load(device=device, dataset=dataset, arch=arch)
+    elif encoder == 'lemeter':
+        model = LeMeterEncoder.load(device=device, dataset=dataset, arch=arch)
+
+    # NOTE: that we do not need to use the AugmentedNyuDataset here since
+    # that is only useful in the pre-training phase. Once the encoder has
+    # been trained using the different views we can test it on the original
+    # dataset
+    ds = DepthTrainDataset(split='test', augment=False)
+    samples_size = num_samples if num_samples is not None else len(ds)
+    total_mutual_information = 0.0
+    for idx in range(samples_size):
+        sample = ds[idx]
+
+        image_tensor = sample["image"].unsqueeze(0).to(device)
+        depth_tensor = sample["depth"].unsqueeze(0).to(device)
+
+        pca_mask, _ = analyze_meter_latent_space(
+            model,
+            image_tensor=image_tensor,
+        )
+
+        pca_resized = F.interpolate(
+            pca_mask,
+            size=globals.INPUT_RESOLUTION,
+            mode='bilinear',
+            align_corners=False
+        )
+
+        depth_resized = F.interpolate(
+            depth_tensor,
+            size=globals.INPUT_RESOLUTION,
+            mode='bilinear',
+            align_corners=False
+        )
+
+        depth_min = depth_resized.min()
+        depth_max = depth_resized.max()
+        depth_normalized = (depth_resized - depth_min) / (depth_max - depth_min + 1e-8)
+        depth_rgb = depth_normalized[0].repeat(3, 1, 1)
+
+        total_mutual_information += compute_mutual_information(pca_resized, depth_resized)
+
+        grid = torchvision.utils.make_grid([image_tensor[0], pca_resized[0], depth_rgb])
+        torchvision.utils.save_image(grid, output_dir / f"pca_comparison_{idx}.png")
+
+    run_metrics = RunMetrics(
+        average_mutual_information=total_mutual_information / samples_size,
+        samples_size=samples_size,
+    )
+    save_pca_results(base_dir, run_name, run_metrics)
+
+
 def main():
     args = parse_cli_args()
-    pretrain_lejepa_encoder(
-        run_name=args.name,
+    # pretrain_lejepa_encoder(
+    #     run_name=args.name,
+    #     config=args.config,
+    #     resume=args.resume,
+    #     arch=args.arch,
+    #     dataset=args.dataset
+    # )
+
+    pca_analysis(
+        output_dir=Path('pca_results/'),
         config=args.config,
-        resume=args.resume,
+        encoder='meter',
         arch=args.arch,
-        dataset=args.dataset
+        dataset=args.dataset,
     )
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
