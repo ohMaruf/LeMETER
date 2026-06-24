@@ -115,9 +115,8 @@ def run_inference(model: nn.Module, x: Tensor) -> Tensor:
 def benchmark_accuracy(model, dataset, device):
     model.to(device).eval()
 
-    sum_sq_error = 0.0  # in cm^2
-    sum_abs_rel = 0.0
-    sum_delta1 = 0.0
+    sum_abs_rel_per_image = 0.0
+    sum_delta1_per_image = 0.0
     sum_rmse_per_image = 0.0
     total_pixels = 0
     image_count = 0
@@ -140,26 +139,23 @@ def benchmark_accuracy(model, dataset, device):
         n = gt_valid.numel()
         sq_err = (gt_valid - pred_valid).square().sum().item()
 
-        # Accumulate globally (RMSE)
-        sum_sq_error += sq_err
+        # Accumulate globally
         total_pixels += n
 
-        # Accumulate per-image (MRMSE)
+        # Accumulate per-image
         sum_rmse_per_image += math.sqrt(sq_err / n) / 100.0  # cm → m
         image_count += 1
 
-        sum_abs_rel += torch.abs(pred_valid - gt_valid).div(gt_valid).sum().item()
+        sum_abs_rel_per_image += torch.abs(pred_valid - gt_valid).div(gt_valid).sum().item() / n
 
         ratio = torch.max(pred_valid / gt_valid, gt_valid / pred_valid)
-        sum_delta1 += (ratio < 1.25).sum().item()
+        sum_delta1_per_image += (ratio < 1.25).sum().item() / n
 
-    rmse = math.sqrt(sum_sq_error / total_pixels) / 100.0  # cm → m
-    mrmse = sum_rmse_per_image / image_count
-    rel = sum_abs_rel / total_pixels
-    delta1 = sum_delta1 / total_pixels
+    rmse = sum_rmse_per_image / image_count
+    rel = sum_abs_rel_per_image / image_count
+    delta1 = sum_delta1_per_image / image_count
 
-    logger.info(f"RMSE  = {rmse:.3f}")
-    logger.info(f"MRMSE = {mrmse:.3f}")
+    logger.info(f"RMSE = {rmse:.3f}")
     logger.info(f"REL   = {rel:.3f}")
     logger.info(f"δ1    = {delta1:.3f}")
 
@@ -208,7 +204,7 @@ def benchmark_inference(
 @torch.no_grad()
 def evaluate(model: Meter, loader: DataLoader, device: torch.device) -> dict[str, float]:
     model.eval()
-    totals = {"mrmse": 0.0, "rel": 0.0, "delta1": 0.0}
+    totals = {"rmse": 0.0, "rel": 0.0, "delta1": 0.0}
     sum_sq_error = 0.0
     total_pixels = 0
     count = 0
@@ -219,7 +215,7 @@ def evaluate(model: Meter, loader: DataLoader, device: torch.device) -> dict[str
         for index in range(x.shape[0]):
             # Eigen-crop + valid-range protocol; rmse comes back in meters
             metrics = depth_metrics(y[index], z[index])
-            totals["mrmse"] += metrics["rmse"]
+            totals["rmse"] += metrics["rmse"]
             totals["rel"] += metrics["rel"]
             totals["delta1"] += metrics["delta1"]
             z_i = z[index].clamp(MIN_DEPTH_CM, MAX_DEPTH_CM)
@@ -231,7 +227,6 @@ def evaluate(model: Meter, loader: DataLoader, device: torch.device) -> dict[str
                 total_pixels += gt_v.numel()
             count += 1
     result = {k: v / count for k, v in totals.items()}
-    result["rmse"] = math.sqrt(sum_sq_error / total_pixels) / 100.0 if total_pixels > 0 else float("nan")
     return result
 
 

@@ -89,7 +89,6 @@ def train_supervised(
         "loss_normal": [],
         "loss_grad": [],
         "rmse": [],
-        "mrmse": [],
         "rel": [],
         "delta1": [],
         "lr": [],
@@ -171,7 +170,6 @@ def train_supervised(
         metrics = evaluate(raw_model, val, device)
         logger.info(f"[{epoch}/{EPOCHS}] train/loss {train_loss:.4f}")
         logger.info(f"[{epoch}/{EPOCHS}] val/RMSE  {metrics['rmse']:.3f}m")
-        logger.info(f"[{epoch}/{EPOCHS}] val/MRMSE {metrics['mrmse']:.3f}m")
         logger.info(f"[{epoch}/{EPOCHS}] val/REL {metrics['rel']:.3f}")
         logger.info(f"[{epoch}/{EPOCHS}] val/d1 {metrics['delta1']:.3f}")
 
@@ -179,7 +177,6 @@ def train_supervised(
         for component, total in epoch_components.items():
             history[component].append(total / len(train))
         history["rmse"].append(metrics["rmse"])
-        history["mrmse"].append(metrics["mrmse"])
         history["rel"].append(metrics["rel"])
         history["delta1"].append(metrics["delta1"])
         history["lr"].append(scheduler.get_last_lr()[0])
@@ -223,7 +220,6 @@ def train_supervised(
 
     test_metrics = evaluate(raw_model, test, device)
     logger.info(f"[final] test/RMSE  {test_metrics['rmse']:.3f}m")
-    logger.info(f"[final] test/MRMSE {test_metrics['mrmse']:.3f}m")
     logger.info(f"[final] test/REL {test_metrics['rel']:.3f}")
     logger.info(f"[final] test/d1 {test_metrics['delta1']:.3f}")
 

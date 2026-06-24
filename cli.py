@@ -1,3 +1,4 @@
+from train_decoder import DecoderSchedule
 import globals
 from meter import MeterArchitecture
 import argparse
@@ -13,9 +14,9 @@ class CliArgs(NamedTuple):
     name: str
     arch: MeterArchitecture
     dataset: DepthDataset
-    freeze_encoder: bool
     checkpoint_epoch: int
     train_decoder: bool
+    decoder_schedule: DecoderSchedule
 
 
 def parse_cli_args() -> CliArgs:
@@ -69,11 +70,12 @@ def parse_cli_args() -> CliArgs:
     )
 
     parser.add_argument(
-        "--no-freeze-encoder",
-        dest="freeze_encoder",
-        action="store_false",
-        default=True,
-        help="disable freezing encoder weights in decoder training",
+        "--decoder-schedule",
+        dest="decoder_schedule",
+        default="warm_start",
+        type=str,
+        choices=["warm_start", "freeze_encoder", "finetune"],
+        help="decoder training schedule",
     )
 
     parser.add_argument(

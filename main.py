@@ -23,7 +23,7 @@ def main():
             resume=args.resume,
             arch=args.arch,
             dataset=args.dataset,
-            freeze_encoder=args.freeze_encoder,
+            schedule=args.decoder_schedule,
             checkpoint_epoch=args.checkpoint_epoch,
         )
 
