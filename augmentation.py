@@ -43,8 +43,9 @@ AugmentationPolicy = Literal["lejepa", "meter", "lemeter"]
 # shifts the depth label by depth_shift_cm centimeters.
 LEJEPA = {
     "mirror": 0.5,
+    "vertical_flip": 0.5,
     "random_crop": 1.0,
-    "random_crop_scale": (0.4, 1.0),
+    "random_crop_scale": (0.4, 0.6),
     "random_crop_ratio": (0.75, 4 / 3),
     "color_jitter": 0.8,
     "color_jitter_strength": (0.8, 0.8, 0.8, 0.2),  # brightness, contrast, saturation, hue
@@ -166,6 +167,7 @@ class ViewAugmentation:
                     antialias=True,
                 ),
                 v2.RandomHorizontalFlip(p=cfg["mirror"]),
+                v2.RandomVerticalFlip(p=cfg["vertical_flip"]),
                 v2.ToDtype(FLOATING_PRECISION, scale=True),
             ])
             self.appearance = v2.Compose([
