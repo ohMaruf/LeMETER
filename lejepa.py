@@ -1,6 +1,4 @@
-from dataclasses import dataclass, asdict
-from dataset import DepthTrainDataset
-import torchvision
+from meter import get_embedding_dim
 from meter import MeterArchitecture
 import json
 import os
@@ -17,10 +15,9 @@ from torch.utils.data import DataLoader
 
 import globals
 import logger
-from cli import parse_cli_args
 from dataset import AugmentedNyuDataset
 from hardware_acceleration import Config, enable_hardware_acceleration
-from meter import LeMeterEncoder, Meter
+from meter import LeMeterEncoder
 from sigreg import SigReg
 from dataset import DepthDataset
 
@@ -42,20 +39,13 @@ def pretrain_lejepa_encoder(
     checkpoint_path = output_dir / "last_checkpoint.pt"
     torch.manual_seed(globals.SEED)
     device = enable_hardware_acceleration(config)
+    embedding_dim = get_embedding_dim(arch)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"run directory: {output_dir}")
 
-    # random initialization: starting from the depth-supervised METER weights
-    # would contaminate the SSL-vs-supervised comparison, since the encoder
-    # would already contain depth-task information before LeJEPA runs
-    meter = Meter(device, arch)
-
-    raw_encoder = LeMeterEncoder(device, meter.encoder).to(device)
-    # with_depth: every view also yields a spatially-aligned depth map, so the
-    # online dense probe can be supervised per-pixel on the same crop/flip the
-    # encoder saw
-    train_ds = AugmentedNyuDataset("train", globals.VIEWS, augmentation="lemeter", with_depth=True)
+    raw_encoder = LeMeterEncoder(device, arch).to(device)
+    train_ds = AugmentedNyuDataset("train", globals.VIEWS, augmentation="lemeter", with_depth=True, normalization="imagenet")
     # shuffle is required: the manifest is grouped by scene (~178 frames per
     # scene), so without it every batch holds near-duplicate frames and the
     # SIGReg batch statistic degenerates
@@ -80,8 +70,8 @@ def pretrain_lejepa_encoder(
     # affine-free BatchNorm only standardizes the frozen features (no learnable
     # depth-specific parameters).
     probe = nn.Sequential(
-        nn.BatchNorm2d(globals.EMBEDDING_DIM, affine=False),
-        nn.Conv2d(globals.EMBEDDING_DIM, 1, kernel_size=1),
+        nn.BatchNorm2d(embedding_dim, affine=False),
+        nn.Conv2d(embedding_dim, 1, kernel_size=1),
     ).to(device)
     sigreg = SigReg().to(device)
 
@@ -167,8 +157,8 @@ def pretrain_lejepa_encoder(
         probe_count = 0
         # streaming per-coordinate stats of the projection, to recover the
         # std of a random 1-D slice: E[Var(proj @ a)] = mean_j Var(proj_j)
-        proj_sum = torch.zeros(globals.PROJ_DIM, device=device)
-        proj_sq = torch.zeros(globals.PROJ_DIM, device=device)
+        proj_sum = torch.zeros(embedding_dim, device=device)
+        proj_sq = torch.zeros(embedding_dim, device=device)
         proj_count = 0
         for views, y in tqdm(train, total=len(train), position=0, leave=True):
             opt.zero_grad(set_to_none=True)
@@ -185,10 +175,14 @@ def pretrain_lejepa_encoder(
             # dense probe in fp32, on detached features: gradients flow only into
             # the 1x1-conv head, never the encoder. each view's depth map is
             # spatially aligned (with_depth=True) and normalized by the 10 m
-            # (1000 cm) sensor range; the prediction is upsampled to the depth grid.
+            # (1000 cm) sensor range.
             depth = y.to(device, non_blocking=True).flatten(0, 1).float() / 1000.0
             pred = probe(feat_map.detach().float())
-            pred = F.interpolate(pred, size=depth.shape[-2:], mode="bilinear", align_corners=False)
+            # score on the probe's native (feature-map) grid: pool the GT down to
+            # the prediction rather than upsampling the coarse prediction up, so R2
+            # reflects depth decodable at the bottleneck resolution (and we skip a
+            # per-step interpolation).
+            depth = F.adaptive_avg_pool2d(depth, pred.shape[-2:])
             valid = depth > 0  # zero == no sensor return, excluded from loss/metrics
             probe_loss = F.mse_loss(pred[valid], depth[valid])
 
@@ -275,180 +269,10 @@ def pretrain_lejepa_encoder(
         with open(output_dir / "losses.json", "w") as losses_file:
             json.dump(history, losses_file)
 
-def _le_encoder_spatial_features(le_encoder: LeMeterEncoder, x: torch.Tensor) -> torch.Tensor:
-    """Bottleneck feature map (N, EMBEDDING_DIM, h, w), i.e. the spatial structure
-    *before* the global average pool that the scalar diagnostic probe reads. The
-    dense probe needs this so it can test whether depth is linearly decodable
-    per-pixel, not just on average."""
-    feats, _ = le_encoder.encoder(x)
-    feats = feats[0] if isinstance(feats, (tuple, list)) else feats
-    return feats
-
-
-@dataclass
-class DenseProbeMetrics:
-    rmse_norm: float
-    rmse_meters: float
-    r2: float
-    delta1: float
-    samples_size: int
-
-
-@torch.no_grad()
-def _evaluate_dense_probe(encoder, probe, loader, device) -> DenseProbeMetrics:
-    probe.eval()
-    ss_res = ss_tot = y_sum = y_sq = count = delta1_hits = 0.0
-    for batch in loader:
-        image = batch["image"].to(device, non_blocking=True)
-        depth = batch["depth"].to(device, non_blocking=True)
-        target = depth / 1000.0  # cm -> fraction of the 10 m sensor range
-
-        with torch.autocast(device.type, dtype=torch.bfloat16):
-            feats = _le_encoder_spatial_features(encoder, image)
-        pred = probe(feats.float())
-        pred = F.interpolate(pred, size=target.shape[-2:], mode="bilinear", align_corners=False)
-
-        valid = target > 0  # zero == no sensor return (invalid), excluded from metrics
-        p = pred[valid]
-        t = target[valid]
-        ss_res += (p - t).square().sum().item()
-        y_sum += t.sum().item()
-        y_sq += t.square().sum().item()
-        count += t.numel()
-
-        ratio = torch.maximum(p.clamp_min(1e-6) / t, t / p.clamp_min(1e-6))
-        delta1_hits += (ratio < 1.25).float().sum().item()
-
-    ss_tot = y_sq - y_sum**2 / max(count, 1)
-    rmse_norm = (ss_res / max(count, 1)) ** 0.5
-    return DenseProbeMetrics(
-        rmse_norm=rmse_norm,
-        rmse_meters=rmse_norm * 10.0,  # normalized unit spans the 10 m range
-        r2=1.0 - ss_res / max(ss_tot, 1e-12),
-        delta1=delta1_hits / max(count, 1),
-        samples_size=int(count),
-    )
-
-
-def dense_depth_probe(
-    checkpoint_path: Path | None,
-    output_dir: Path = Path("pca_results"),
-    config: Config = Config.DEFAULT,
-    arch: MeterArchitecture = "xxs",
-    dataset: DepthDataset = "nyu",
-    epochs: int = 10,
-    lr: float = 1e-3,
-    num_vis: int = 10,
-):
-    """Dense per-pixel linear probe (Objective 2 / geometric probing).
-
-    Freezes the encoder and trains only a 1x1 conv (a per-pixel linear map) from
-    the bottleneck features to depth, then reports R2 / RMSE / delta1 and writes
-    predicted-vs-ground-truth depth maps. Because the encoder never updates, the
-    score measures how much *spatially structured* depth information the frozen
-    representation already carries -- the real signal the scalar probe cannot see.
-
-    Pass `checkpoint_path=None` for the random-init control arm.
-    """
-    assert dataset == "nyu", "kitti dataset not implemented yet"
-    torch.manual_seed(globals.SEED)
-    device = enable_hardware_acceleration(config)
-
-    arm = "random" if checkpoint_path is None else checkpoint_path.parent.name
-    out_dir = output_dir / f"dense_probe/{dataset}/{arm}/{arch}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    meter = Meter(device, arch)
-    encoder = LeMeterEncoder(device, meter.encoder).to(device)
-    if checkpoint_path is not None:
-        ckpt = torch.load(checkpoint_path, map_location=device)
-        encoder.load_state_dict(ckpt["model_state"])
-        logger.info(f"loaded encoder from {checkpoint_path}")
-    else:
-        logger.warn("no checkpoint: probing a randomly initialized encoder (control)")
-    encoder.eval()
-    for p in encoder.parameters():
-        p.requires_grad_(False)
-
-    # 1x1 conv == per-pixel linear map; the affine-free BatchNorm just
-    # standardizes the frozen features so the linear layer conditions well, and
-    # carries no learnable depth-specific parameters of its own
-    probe = nn.Sequential(
-        nn.BatchNorm2d(globals.EMBEDDING_DIM, affine=False),
-        nn.Conv2d(globals.EMBEDDING_DIM, 1, kernel_size=1),
-    ).to(device)
-
-    common = dict(
-        batch_size=globals.BATCH_SIZE,
-        num_workers=min(globals.DATALOADER_WORKERS, os.cpu_count() or 1),
-        prefetch_factor=2,
-        pin_memory=False,
-        persistent_workers=True,
-    )
-    train_ds = DepthTrainDataset(split="train", augment=False)
-    test_ds = DepthTrainDataset(split="test", augment=False)
-    train = DataLoader(train_ds, shuffle=True, drop_last=True, **common)
-    test = DataLoader(test_ds, shuffle=False, drop_last=False, **common)
-
-    opt = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=1e-4)
-
-    for epoch in range(epochs):
-        probe.train()
-        epoch_loss = 0.0
-        for batch in tqdm(train, total=len(train), position=0, leave=True):
-            image = batch["image"].to(device, non_blocking=True)
-            depth = batch["depth"].to(device, non_blocking=True)
-            target = depth / 1000.0
-
-            with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16):
-                feats = _le_encoder_spatial_features(encoder, image)
-            pred = probe(feats.float())
-            pred = F.interpolate(pred, size=target.shape[-2:], mode="bilinear", align_corners=False)
-
-            valid = target > 0
-            loss = F.mse_loss(pred[valid], target[valid])
-
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
-            epoch_loss += loss.item()
-
-        metrics = _evaluate_dense_probe(encoder, probe, test, device)
-        logger.info(
-            f"[{epoch + 1}/{epochs}] train_mse {epoch_loss / len(train):.5f} | "
-            f"test R2 {metrics.r2:.4f} RMSE {metrics.rmse_meters:.3f} m delta1 {metrics.delta1:.4f}"
-        )
-
-    with open(out_dir / "metrics.json", "w") as f:
-        json.dump(asdict(metrics), f, indent=4)
-
-    # predicted-vs-ground-truth depth maps for a handful of test images
-    probe.eval()
-    for idx in range(min(num_vis, len(test_ds))):
-        sample = test_ds[idx]
-        image = sample["image"].unsqueeze(0).to(device)
-        depth = sample["depth"].unsqueeze(0).to(device)
-
-        with torch.no_grad(), torch.autocast(device.type, dtype=torch.bfloat16):
-            feats = _le_encoder_spatial_features(encoder, image)
-        pred = probe(feats.float())
-        pred = F.interpolate(pred, size=globals.INPUT_RESOLUTION, mode="bilinear", align_corners=False)
-        gt = F.interpolate(depth, size=globals.INPUT_RESOLUTION, mode="bilinear", align_corners=False)
-
-        def _to_rgb(m: torch.Tensor) -> torch.Tensor:
-            m = (m - m.amin()) / (m.amax() - m.amin() + 1e-8)
-            return m[0].repeat(3, 1, 1)
-
-        img_disp = _to_rgb(image)  # min-max so the z-scored input is viewable
-        grid = torchvision.utils.make_grid([img_disp, _to_rgb(pred), _to_rgb(gt)])
-        torchvision.utils.save_image(grid, out_dir / f"dense_probe_{idx}.png")
-
-    logger.info(f"wrote dense-probe results to {out_dir}")
-    return metrics
-
-
 
 def main():
+    from cli import parse_cli_args
+
     args = parse_cli_args()
     pretrain_lejepa_encoder(
         run_name=args.name,

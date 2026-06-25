@@ -1,7 +1,6 @@
 from typing import Literal
 from eval import evaluate
 import json
-from cli import parse_cli_args
 from dataset import DepthDataset, DepthTrainDataset
 import math
 import os
@@ -258,6 +257,8 @@ def train_decoder(
             json.dump(history, losses_file)
 
 def main():
+    from cli import parse_cli_args
+
     args = parse_cli_args()
     train_decoder(
         run_name=args.name,

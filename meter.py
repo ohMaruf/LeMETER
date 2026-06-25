@@ -1,3 +1,4 @@
+from derf import convert_relu_to_gelu
 from derf import convert_ln_to_derf
 import torch
 import torch.nn as nn
@@ -6,7 +7,7 @@ from einops import rearrange
 from typing import Literal
 from pathlib import Path
 
-from globals import FLOATING_PRECISION, PROJ_DIM, EMBEDDING_DIM, INPUT_RESOLUTION
+from globals import INPUT_RESOLUTION
 
 MeterArchitecture = Literal["s", "xs", "xxs"]
 
@@ -311,6 +312,25 @@ def mobilevit_s() -> tuple[MobileViT, str]:
     return MobileViT(INPUT_RESOLUTION, dims, channels), enc_type
 
 
+def build_mobilevit(arch: MeterArchitecture = "xxs") -> tuple[MobileViT, str]:
+    match arch:
+        case "xxs":
+            return mobilevit_xxs()
+        case "xs":
+            return mobilevit_xs()
+        case "s":
+            return mobilevit_s()
+
+
+def get_embedding_dim(arch: MeterArchitecture = "xxs") -> int:
+    match arch:
+        case "xxs":
+            return 160
+        case "xs":
+            return 192
+        case "s":
+            return 320
+
 class UpSample_layer(nn.Module):
     def __init__(self, inp, oup, flag, sep_conv_filters, name, device):
         super(UpSample_layer, self).__init__()
@@ -426,15 +446,16 @@ class Meter(nn.Module):
 
 
 class LeMeterEncoder(nn.Module):
-    def __init__(self, device: torch.device, encoder: MobileViT):
+    def __init__(self, device: torch.device, arch: MeterArchitecture = "xxs"):
         super(LeMeterEncoder, self).__init__()
-
-        self.encoder = encoder
+        self.encoder, _ = build_mobilevit(arch)
+        embedding_dim = get_embedding_dim(arch)
         self.pred = MLP(
-            EMBEDDING_DIM,
-            [4 * EMBEDDING_DIM, 4 * EMBEDDING_DIM, PROJ_DIM],
+            embedding_dim,
+            [4 * embedding_dim, 4 * embedding_dim, embedding_dim],
             norm_layer=nn.BatchNorm1d,
         )
+    
 
     def forward(self, x):
         N, V = x.shape[:2]
@@ -449,6 +470,17 @@ class LeMeterEncoder(nn.Module):
         proj = self.pred(emb).reshape(N, V, -1).transpose(0, 1)
 
         return emb, proj, skip_connections, feat_map
+    
+    @staticmethod
+    def load(device: torch.device, dataset: Literal["nyu", "kitti"] = "nyu", arch: MeterArchitecture = "xxs") -> "LeMeterEncoder":
+        model = LeMeterEncoder(device, arch)
+        NAME = "06lemeter2406_1902"
+        checkpoint_path = Path(__file__).parent / "runs" / f"{dataset}_{arch}_{NAME}_encoder" / "last_checkpoint.pt"
+        state_dict = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(state_dict["model_state"])
+        model.to(device)
+        model.eval()
+        return model
 
 
 class LeMeter(nn.Module):

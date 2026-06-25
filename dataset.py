@@ -15,10 +15,8 @@ from PIL import Image
 from pathlib import Path
 from torch.utils.data import Dataset
 from torch import Tensor
-from tqdm import tqdm
 from typing import Literal
 
-import logger
 from augmentation import AugmentationPolicy, ViewAugmentation, PairedDepthAugmentation
 
 DepthDataset = Literal["nyu", "kitti"]
@@ -158,10 +156,6 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
             self.paired_aug = PairedDepthAugmentation(augmentation)
             self.resize = v2.Resize(INPUT_RESOLUTION, antialias=True)
         else:
-            # scalar target for the online depth probe: flip-invariant and cached,
-            # so depth PNG decoding stays out of the training workers
-            self.mean_depth_cm = self._load_mean_depth_cache(split)
-
             # all augmentation lives in augmentation.py; normalize is passed in so
             # the METER channel swap / shifting strategy run on un-normalized pixels
             self.view_aug = ViewAugmentation(augmentation, self.zscore_normalize)
@@ -175,23 +169,6 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
             ]
         )
 
-    def _load_mean_depth_cache(self, split: Literal["train", "test"]) -> Tensor:
-        """Per-image mean depth in centimeters, aligned with the manifest order.
-        Built once, then loaded from disk."""
-        cache_path = self.root / f"mean_depth_cm_{split}.pt"
-        if cache_path.exists():
-            return torch.load(cache_path)
-
-        logger.info(f"building mean-depth cache for split '{split}' (one-time)")
-        means = torch.empty(len(self.samples))
-        for index in tqdm(range(len(self.samples)), desc="mean depth"):
-            depth_path = self._resolve_sample_path(self.samples.iloc[index]["depth_path"])
-            means[index] = self._load_depth_tensor(depth_path).mean()
-
-        torch.save(means, cache_path)
-        logger.info(f"wrote {cache_path}")
-        return means
-
     def _augmented_pair(self, image_255: Tensor, depth_cm: Tensor) -> tuple[Tensor, Tensor]:
         """One augmented view + its aligned depth: spatial transform shared,
         photometric jitter on the image only. Image -> normalized; depth ->
@@ -199,7 +176,7 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         view, depth = self.paired_aug(image_255.clone(), depth_cm.clone())
         return self._normalize_image(view), F.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> tuple[Tensor, Tensor] | Tensor:
         sample = self.samples.iloc[index]
 
         if self.with_depth:
@@ -208,26 +185,19 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
             image = self.resize(image)  # common base size so all views stack
 
             if self.views > 1:
-                pairs = [self._augmented_pair(image, depth) for _ in range(self.views - 1)]
-                # final view is clean (no spatial aug), depth still aligned
-                pairs.append((self._normalize_image(image), F.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)))
+                pairs = [self._augmented_pair(image, depth) for _ in range(self.views)]
                 views, depths = zip(*pairs)
                 return torch.stack(views), torch.stack(depths)
 
             return self._normalize_image(image), F.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)
 
         image = self._load_image_tensor_uint8(self._resolve_sample_path(sample["image_path"]))
-
-        # the full depth map stays out of the workers (PNG decode + queue RAM);
-        # the online probe only needs the cached per-image mean depth
-        mean_depth_cm = self.mean_depth_cm[index]
-
         if self.views > 1:
             # each view gets its own crop: spatial invariance is the main
             # signal LeJEPA learns from, photometric jitter alone is too weak
-            return torch.stack([self.view_aug(image) for _ in range(self.views - 1)] + [image]), mean_depth_cm
+            return torch.stack([self.view_aug(image) for _ in range(self.views)])
 
-        return self.test(image), mean_depth_cm
+        return self.test(image)
 
 
 

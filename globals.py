@@ -13,8 +13,6 @@ DATALOADER_WORKERS = 24
 
 FLOATING_PRECISION = torch.float32
 NUM_SLICES = 256
-PROJ_DIM = 160
-EMBEDDING_DIM = 160
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-3
 # pretraining starts from a random encoder, so it needs a full schedule
