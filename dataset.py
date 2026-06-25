@@ -23,7 +23,7 @@ DepthDataset = Literal["nyu", "kitti"]
 Split = Literal["train", "val", "test"]
 
 VAL_SCENE_FRACTION = 0.05
-TRAIN_SAMPLES = 10_000
+# TRAIN_SAMPLES = 10_000
 
 
 def _partition_train_scenes(samples: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -77,7 +77,8 @@ class NormalizedNyuDataset(Dataset):
         if split == "test":
             return pd.read_csv(test_manifest_path, names=["image_path", "depth_path"], header=None)
 
-        train_manifest = pd.read_csv(train_manifest_path, names=["image_path", "depth_path"], header=None).sample(n=TRAIN_SAMPLES, random_state=SEED)
+        # train_manifest = pd.read_csv(train_manifest_path, names=["image_path", "depth_path"], header=None).sample(n=TRAIN_SAMPLES, random_state=SEED)
+        train_manifest = pd.read_csv(train_manifest_path, names=["image_path", "depth_path"], header=None)
         train_scenes, val_scenes = _partition_train_scenes(train_manifest)
         if split == "val":
             return val_scenes
