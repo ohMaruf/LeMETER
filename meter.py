@@ -457,7 +457,7 @@ class LeMeterEncoder(nn.Module):
         )
     
 
-    def forward(self, x):
+    def forward(self, x, local_views=None):
         N, V = x.shape[:2]
         x = x.flatten(0, 1)
 
@@ -467,14 +467,33 @@ class LeMeterEncoder(nn.Module):
         # the dense per-pixel depth probe so it sees spatial structure
         emb = feat_map.mean(dim=[2, 3]) if feat_map.dim() == 4 else feat_map
 
-        proj = self.pred(emb).reshape(N, V, -1).transpose(0, 1)
+        if local_views is None:
+            proj = self.pred(emb).reshape(N, V, -1).transpose(0, 1)
+            return emb, proj, skip_connections, feat_map
 
+        # Multi-crop: locals run through the same encoder. Global-average pooling
+        # makes the embedding resolution-independent, so a 96x128 local and a
+        # 192x256 global both reduce to the same D-vector and share the loss.
+        Nl, Vl = local_views.shape[:2]
+        lfeatures, _ = self.encoder(local_views.flatten(0, 1))
+        lfeat_map = lfeatures[0] if isinstance(lfeatures, (tuple, list)) else lfeatures
+        lemb = lfeat_map.mean(dim=[2, 3]) if lfeat_map.dim() == 4 else lfeat_map
+
+        # One pred pass so BatchNorm sees globals+locals together, then regroup
+        # per image as [N, Vg+Vl, D] before the loss's [views, N, D] layout.
+        proj_all = self.pred(torch.cat([emb, lemb], dim=0))
+        proj_g = proj_all[: N * V].reshape(N, V, -1)
+        proj_l = proj_all[N * V :].reshape(Nl, Vl, -1)
+        proj = torch.cat([proj_g, proj_l], dim=1).transpose(0, 1)
+
+        # feat_map / skip_connections stay global-only: the dense probe needs
+        # depth-aligned features, which the cropped-FOV locals don't provide.
         return emb, proj, skip_connections, feat_map
     
     @staticmethod
     def load(device: torch.device, dataset: Literal["nyu", "kitti"] = "nyu", arch: MeterArchitecture = "xxs") -> "LeMeterEncoder":
         model = LeMeterEncoder(device, arch)
-        NAME = "06lemeter2406_1902"
+        NAME = "08densefulldata"
         checkpoint_path = Path(__file__).parent / "runs" / f"{dataset}_{arch}_{NAME}_encoder" / "last_checkpoint.pt"
         state_dict = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(state_dict["model_state"])

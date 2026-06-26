@@ -139,18 +139,31 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         augmentation: AugmentationPolicy = "lejepa",
         normalization: Literal["imagenet", "dataset"] = "dataset",
         with_depth: bool = False,
+        local_views: int = 0,
+        local_augmentation: AugmentationPolicy | None = None,
+        local_resolution: tuple[int, int] = INPUT_RESOLUTION,
+        global_scale: tuple[float, float] | None = None,
+        local_scale: tuple[float, float] | None = None,
     ) -> None:
         super().__init__(split, holdout_val=False, normalization=normalization)
 
         self.views = views
         self.augmentation = augmentation
-        # when True, each view returns its own depth map with the *same* spatial
-        # transform applied, so a dense per-pixel probe trains on aligned pixels.
-        # this re-introduces per-worker depth PNG decode (the cost the scalar
-        # mean-depth cache avoids), so it is opt-in.
         self.with_depth = with_depth
+        self.local_views = local_views
+        self.multicrop = with_depth and local_views > 0
 
-        if with_depth:
+        if self.multicrop:
+            self.global_aug = PairedDepthAugmentation(
+                augmentation, target_size=INPUT_RESOLUTION, crop_scale=global_scale
+            )
+            self.local_aug = PairedDepthAugmentation(
+                local_augmentation or augmentation,
+                target_size=local_resolution,
+                crop_scale=local_scale,
+            )
+            self.resize = v2.Resize(INPUT_RESOLUTION, antialias=True)
+        elif with_depth:
             # PairedDepthAugmentation applies spatial ops to both image and depth
             # and photometric ops to the image only; the resize gives every view
             # a common base size before the (optional) crop
@@ -177,8 +190,28 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         view, depth = self.paired_aug(image_255.clone(), depth_cm.clone())
         return self._normalize_image(view), F.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)
 
-    def __getitem__(self, index: int) -> tuple[Tensor, Tensor] | Tensor:
+    def _augmented_local(self, image_255: Tensor, depth_cm: Tensor) -> Tensor:
+        """One local (smaller, harder-zoomed) view, image only. The joint aug
+        also crops the depth so the relative window matches, but the local depth
+        is discarded — the probe only supervises globals."""
+        view, _ = self.local_aug(image_255.clone(), depth_cm.clone())
+        return self._normalize_image(view)
+
+    def __getitem__(self, index: int) -> tuple[Tensor, ...] | Tensor:
         sample = self.samples.iloc[index]
+
+        if self.multicrop:
+            image = self._load_image_tensor(self._resolve_sample_path(sample["image_path"]))  # float [0, 255]
+            depth = self._load_depth_tensor(self._resolve_sample_path(sample["depth_path"]))  # cm, full res
+            image = self.resize(image)  # common base size before crops
+
+            globals_, gdepths = [], []
+            for _ in range(self.views):
+                view, gdepth = self.global_aug(image.clone(), depth.clone())
+                globals_.append(self._normalize_image(view))
+                gdepths.append(F.adaptive_avg_pool2d(gdepth, OUTPUT_RESOLUTION))
+            locals_ = [self._augmented_local(image, depth) for _ in range(self.local_views)]
+            return torch.stack(globals_), torch.stack(locals_), torch.stack(gdepths)
 
         if self.with_depth:
             image = self._load_image_tensor(self._resolve_sample_path(sample["image_path"]))  # float [0, 255]

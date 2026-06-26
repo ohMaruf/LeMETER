@@ -223,15 +223,25 @@ class PairedDepthAugmentation:
       - "lemeter": randomly decide if to apply meter or lejepa augmentation.
     """
 
-    def __init__(self, policy: AugmentationPolicy = "meter") -> None:
+    def __init__(
+        self,
+        policy: AugmentationPolicy = "meter",
+        target_size: tuple[int, int] = INPUT_RESOLUTION,
+        crop_scale: tuple[float, float] | None = None,
+    ) -> None:
         if policy not in POLICIES:
             raise ValueError(f"unknown augmentation policy {policy!r}")
         self.policy = policy
         self.config = POLICIES[policy]
+        # multi-crop knobs: the crop resizes to `target_size` (locals are
+        # smaller), and `crop_scale` overrides the policy's kept-area fraction
+        # (global vs local zoom). Both default to the single-resolution behavior.
+        self.target_size = target_size
+        self.crop_scale = crop_scale
 
         if policy == "lemeter":
-            self._meter = PairedDepthAugmentation("meter")
-            self._lejepa = PairedDepthAugmentation("lejepa")
+            self._meter = PairedDepthAugmentation("meter", target_size, crop_scale)
+            self._lejepa = PairedDepthAugmentation("lejepa", target_size, crop_scale)
             self.appearance = None
         elif policy == "lejepa":
             cfg = self.config
@@ -252,9 +262,10 @@ class PairedDepthAugmentation:
     def _joint_crop(self, image: Tensor, depth_cm: Tensor) -> tuple[Tensor, Tensor]:
         """Apply the same relative crop window to image and full-res depth."""
         cfg = self.config
+        scale = self.crop_scale if self.crop_scale is not None else cfg["random_crop_scale"]
         top, left, height, width = transforms.RandomResizedCrop.get_params(
             image,
-            scale=list(cfg["random_crop_scale"]),
+            scale=list(scale),
             ratio=list(cfg["random_crop_ratio"]),
         )
         sh = depth_cm.shape[-2] / image.shape[-2]
@@ -263,7 +274,7 @@ class PairedDepthAugmentation:
             depth_cm, round(top * sh), round(left * sw), round(height * sh), round(width * sw)
         )
         image = TF.resized_crop(
-            image, top, left, height, width, list(INPUT_RESOLUTION), antialias=True
+            image, top, left, height, width, list(self.target_size), antialias=True
         )
         return image, depth_cm
 
