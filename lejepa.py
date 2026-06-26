@@ -45,18 +45,7 @@ def pretrain_lejepa_encoder(
     logger.info(f"run directory: {output_dir}")
 
     raw_encoder = LeMeterEncoder(device, arch).to(device)
-    train_ds = AugmentedNyuDataset(
-        "train",
-        globals.GLOBAL_VIEWS,
-        augmentation=globals.GLOBAL_POLICY,
-        with_depth=True,
-        normalization="imagenet",
-        local_views=globals.LOCAL_VIEWS,
-        local_augmentation=globals.LOCAL_POLICY,
-        local_resolution=globals.LOCAL_RESOLUTION,
-        global_scale=globals.GLOBAL_CROP_SCALE,
-        local_scale=globals.LOCAL_CROP_SCALE,
-    )
+    train_ds = AugmentedNyuDataset("train", globals.VIEWS, augmentation="lemeter", with_depth=True, normalization="imagenet")
     # shuffle is required: the manifest is grouped by scene (~178 frames per
     # scene), so without it every batch holds near-duplicate frames and the
     # SIGReg batch statistic degenerates
@@ -171,13 +160,12 @@ def pretrain_lejepa_encoder(
         proj_sum = torch.zeros(embedding_dim, device=device)
         proj_sq = torch.zeros(embedding_dim, device=device)
         proj_count = 0
-        for global_views, local_views, y in tqdm(train, total=len(train), position=0, leave=True):
+        for views, y in tqdm(train, total=len(train), position=0, leave=True):
             opt.zero_grad(set_to_none=True)
 
             with torch.autocast(device.type, dtype=torch.bfloat16): # bfloat16 is numerically more stable than float16
-                global_views = global_views.to(device, non_blocking=True)
-                local_views = local_views.to(device, non_blocking=True)
-                emb, proj, _, feat_map = encoder(global_views, local_views)
+                views = views.to(device, non_blocking=True)
+                emb, proj, _, feat_map = encoder(views)
 
                 proj_mean = proj.mean(0)
                 inv_loss = (proj_mean - proj).square().mean()
@@ -240,7 +228,7 @@ def pretrain_lejepa_encoder(
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/invariance {epoch_inv / len(train)}")
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/sigreg {epoch_sigreg / len(train)}")
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/probe_r2 {probe_r2:.4f}")
-        logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/proj_sigma {proj_sigma:.4f}")
+        logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/proj_sigma {proj_sigma:.4f} (target 1.0)")
 
         history["sigreg_loss"].append(epoch_sigreg / len(train))
         history["inv_loss"].append(epoch_inv / len(train))
