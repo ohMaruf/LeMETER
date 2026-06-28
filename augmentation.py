@@ -31,7 +31,7 @@ from torchvision.transforms import functional as TF
 
 from globals import INPUT_RESOLUTION, FLOATING_PRECISION
 
-AugmentationPolicy = Literal["lejepa", "meter", "lemeter"]
+AugmentationPolicy = Literal["lejepa", "lejepa_multi_view", "meter", "lemeter"]
 
 # ---------------------------------------------------------------------------
 # Augmentation parameters
@@ -48,13 +48,47 @@ LEJEPA = {
     "random_crop_scale": (0.4, 0.6),
     "random_crop_ratio": (0.75, 4 / 3),
     "color_jitter": 0.8,
-    "color_jitter_strength": (0.8, 0.8, 0.8, 0.2),  # brightness, contrast, saturation, hue
+    # brightness, contrast, saturation, hue
+    "color_jitter_strength": (0.8, 0.8, 0.8, 0.2),
     "grayscale": 0.2,
     "gaussian_blur": 0.5,
     "gaussian_blur_kernel": 7,
     "gaussian_blur_sigma": (0.1, 2.0),
     "solarize": 0.2,
     "solarize_threshold": 0.5,
+}
+
+LEJEPA_MULTI_VIEW = {
+    "global": {
+        "random_crop": 1.0,
+        "random_crop_scale": (0.3, 1.0),
+        "random_crop_ratio": (0.75, 4 / 3),
+        "mirror": 0.5,
+        "color_jitter": 0.8,
+        # brightness, contrast, saturation, hue
+        "color_jitter_strength": (0.4, 0.4, 0.2, 0.1),
+        "grayscale": 0.2,
+        "gaussian_blur": 0.5,
+        "gaussian_blur_kernel": 7,
+        "gaussian_blur_sigma": (0.1, 2.0),
+        "solarize": 0.2,
+        "solarize_threshold": 0.5,
+    },
+    "local": {
+        "random_crop": 1.0,
+        "random_crop_scale": (0.05, 0.3),
+        "random_crop_ratio": (0.75, 4 / 3),
+        "mirror": 0.5,
+        "color_jitter": 0.8,
+        # brightness, contrast, saturation, hue
+        "color_jitter_strength": (0.4, 0.4, 0.2, 0.1),
+        "grayscale": 0.2,
+        "gaussian_blur": 0.5,
+        "gaussian_blur_kernel": 7,
+        "gaussian_blur_sigma": (0.1, 2.0),
+        "solarize": 0.2,
+        "solarize_threshold": 0.5,
+    }
 }
 
 METER = {
@@ -79,9 +113,11 @@ LEMETER = {
 
 POLICIES: dict[AugmentationPolicy, dict] = {
     "lejepa": LEJEPA,
+    "lejepa_multi_view": LEJEPA_MULTI_VIEW,
     "meter": METER,
     "lemeter": LEMETER,
 }
+
 
 
 # ---------------------------------------------------------------------------
@@ -123,13 +159,28 @@ class ViewAugmentation:
     so the channel swap / shifting strategy operate on un-normalized pixels.
     """
 
-    def __init__(self, policy: AugmentationPolicy, normalize) -> None:
+    def __init__(
+        self,
+        policy: AugmentationPolicy,
+        normalize,
+        view_type: Literal['global', 'local'] | None = None
+    ) -> None:
         if policy not in POLICIES:
             raise ValueError(f"unknown augmentation policy {policy!r}")
         self.policy = policy
         self.config = POLICIES[policy]
         self.normalize = normalize
-        cfg = self.config
+
+        if policy == "lejepa_multi_view":
+            if view_type not in ('global', 'view'):
+                raise ValueError(
+                    "view_type must be 'global' or 'local'"
+                    "for 'lejepa_multi_view' augmentation"
+                )
+            cfg = self.config[view_type]
+            self.view_type = view_type
+        else:
+            cfg = self.config
 
         if policy == "lemeter":
             # each view randomly gets the full meter OR full lejepa policy; build
@@ -155,6 +206,40 @@ class ViewAugmentation:
                 v2.RandomVerticalFlip(p=cfg["vertical_flip"]),
             ])
             self.appearance = None
+        elif policy == "lejepa_multi_view":
+            self.spatial = v2.Compose([
+                v2.ToImage(),
+                v2.RandomResizedCrop(
+                    size=INPUT_RESOLUTION,
+                    scale=cfg['random_crop_scale'],
+                    ratio=cfg['random_crop_ratio'],
+                    antialias=True,
+                ),
+                v2.RandomHorizontalFlip(p=cfg['mirror']),
+                v2.ToDtype(FLOATING_PRECISION, scale=True),
+            ])
+
+            self.appearance = v2.Compose([
+                v2.RandomApply(
+                    v2.ColorJitter(*cfg['color_jitter_strength']),
+                    p=cfg['color_jitter'],
+                ),
+                v2.RandomGrayscale(p=cfg['grayscale']),
+                v2.RandomApply(
+                    [
+                        v2.GaussianBlur(
+                            kernel_size=cfg["gaussian_blur_kernel"],
+                            sigma=cfg["gaussian_blur_sigma"]
+                        )
+                    ],
+                    p=cfg["gaussian_blur"],
+                ),
+                v2.RandomApply(
+                    [
+                        v2.RandomSolarize(treshold=cfg['solarize_threshold']),
+                    ]
+                ),
+            ])
         else:
             # lejepa: crop to float [0, 1], then DINO photometric jitter.
             # `scale` is the kept-area fraction (default would be 0.08-1.0).

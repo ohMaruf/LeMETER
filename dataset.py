@@ -9,6 +9,7 @@ from globals import (
     OUTPUT_RESOLUTION,
     SEED,
 )
+import globals
 from torchvision.transforms import v2
 from torchvision.transforms import functional as TF
 from PIL import Image
@@ -157,9 +158,19 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
             self.paired_aug = PairedDepthAugmentation(augmentation)
             self.resize = v2.Resize(INPUT_RESOLUTION, antialias=True)
         else:
-            # all augmentation lives in augmentation.py; normalize is passed in so
-            # the METER channel swap / shifting strategy run on un-normalized pixels
-            self.view_aug = ViewAugmentation(augmentation, self.zscore_normalize)
+            if augmentation == 'lejepa_multi_view':
+                self.global_view_aug = ViewAugmentation(
+                    'lejepa_multi_view',
+                    self.zscore_normalize,
+                    view_type='global'
+                )
+                self.local_view_aug = ViewAugmentation(
+                    'lejepa_multi_view',
+                    self.zscore_normalize,
+                    view_type='local'
+                )
+            else:
+                self.view_aug = ViewAugmentation(augmentation, self.zscore_normalize)
 
         self.test = v2.Compose(
             [
@@ -194,9 +205,13 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
 
         image = self._load_image_tensor_uint8(self._resolve_sample_path(sample["image_path"]))
         if self.views > 1:
-            # each view gets its own crop: spatial invariance is the main
-            # signal LeJEPA learns from, photometric jitter alone is too weak
-            return torch.stack([self.view_aug(image) for _ in range(self.views)])
+            Vg = globals.GLOBAL_VIEWS
+            Vl = globals.LOCAL_VIEWS
+
+            views = [self.global_view_aug(image) for _ in range(Vg)] + \
+                [self.local_view_aug(image) for _ in range(Vl)]
+
+            return torch.stack(views)
 
         return self.test(image)
 
