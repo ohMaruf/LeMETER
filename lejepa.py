@@ -176,10 +176,9 @@ def pretrain_lejepa_encoder(
                     (proj_g_mean - proj_l).square().mean()
                     if proj_l.numel() > 0 else 0.0
                 )
-                inv_loss_g = (proj_g_mean - proj_g).square().mean()
-                inv_loss = (
-                    globals.LAMBDA * inv_loss_l + globals.LAMBDA * inv_loss_g
-                )
+                # inv_loss_g = (proj_g_mean - proj_g).square().mean()
+                # inv_loss = inv_loss_l + inv_loss_g
+                inv_loss = inv_loss_l
 
                 sigreg_loss = sigreg(proj)
                 lejepa_loss = sigreg_loss * globals.LAMBDA + inv_loss * (1 - globals.LAMBDA)

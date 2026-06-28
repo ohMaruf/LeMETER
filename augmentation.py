@@ -221,7 +221,7 @@ class ViewAugmentation:
 
             self.appearance = v2.Compose([
                 v2.RandomApply(
-                    v2.ColorJitter(*cfg['color_jitter_strength']),
+                    [v2.ColorJitter(*cfg['color_jitter_strength'])],
                     p=cfg['color_jitter'],
                 ),
                 v2.RandomGrayscale(p=cfg['grayscale']),
@@ -237,7 +237,8 @@ class ViewAugmentation:
                 v2.RandomApply(
                     [
                         v2.RandomSolarize(threshold=cfg['solarize_threshold']),
-                    ]
+                    ],
+                    p=cfg["solarize"],
                 ),
             ])
         else:

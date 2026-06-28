@@ -248,11 +248,13 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
 
         image = self._load_image_tensor_uint8(self._resolve_sample_path(sample["image_path"]))
         if self.views > 1:
-            Vg = globals.GLOBAL_VIEWS
-            Vl = globals.LOCAL_VIEWS
-
-            views = [self.global_view_aug(image) for _ in range(Vg)] + \
-                [self.local_view_aug(image) for _ in range(Vl)]
+            if self.augmentation == 'lejepa_multi_view':
+                Vg = globals.GLOBAL_VIEWS
+                Vl = globals.LOCAL_VIEWS
+                views = [self.global_view_aug(image) for _ in range(Vg)] + \
+                    [self.local_view_aug(image) for _ in range(Vl)]
+            else:
+                views = [self.view_aug(image) for _ in range(self.views)]
 
             return torch.stack(views)
 
