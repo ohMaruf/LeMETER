@@ -172,7 +172,7 @@ class ViewAugmentation:
         self.normalize = normalize
 
         if policy == "lejepa_multi_view":
-            if view_type not in ('global', 'view'):
+            if view_type not in ('global', 'local'):
                 raise ValueError(
                     "view_type must be 'global' or 'local'"
                     "for 'lejepa_multi_view' augmentation"
@@ -236,7 +236,7 @@ class ViewAugmentation:
                 ),
                 v2.RandomApply(
                     [
-                        v2.RandomSolarize(treshold=cfg['solarize_threshold']),
+                        v2.RandomSolarize(threshold=cfg['solarize_threshold']),
                     ]
                 ),
             ])
@@ -308,13 +308,34 @@ class PairedDepthAugmentation:
       - "lemeter": randomly decide if to apply meter or lejepa augmentation.
     """
 
-    def __init__(self, policy: AugmentationPolicy = "meter") -> None:
+    def __init__(
+        self,
+        policy: AugmentationPolicy = "meter",
+        view_type: Literal['global', 'local'] | None = None
+    ) -> None:
         if policy not in POLICIES:
             raise ValueError(f"unknown augmentation policy {policy!r}")
         self.policy = policy
         self.config = POLICIES[policy]
 
-        if policy == "lemeter":
+        if policy == 'lejepa_multi_view':
+            if view_type not in ('global', 'local'):
+                raise ValueError(
+                    "view_type must be 'global' or 'local'"
+                    "for 'lejepa_multi_view' augmentation"
+                )
+            self.cfg = self.config[view_type]
+            cfg = self.cfg
+            self.appearance = v2.Compose([
+                v2.RandomApply([v2.ColorJitter(*cfg["color_jitter_strength"])], p=cfg["color_jitter"]),
+                v2.RandomGrayscale(p=cfg["grayscale"]),
+                v2.RandomApply(
+                    [v2.GaussianBlur(kernel_size=cfg["gaussian_blur_kernel"], sigma=cfg["gaussian_blur_sigma"])],
+                    p=cfg["gaussian_blur"],
+                ),
+                v2.RandomApply([v2.RandomSolarize(threshold=cfg["solarize_threshold"])], p=cfg["solarize"]),
+            ])
+        elif policy == "lemeter":
             self._meter = PairedDepthAugmentation("meter")
             self._lejepa = PairedDepthAugmentation("lejepa")
             self.appearance = None
@@ -332,11 +353,12 @@ class PairedDepthAugmentation:
                 v2.RandomApply([v2.RandomSolarize(threshold=cfg["solarize_threshold"])], p=cfg["solarize"]),
             ])
         else:
+            self.cfg = self.config
             self.appearance = None
 
     def _joint_crop(self, image: Tensor, depth_cm: Tensor) -> tuple[Tensor, Tensor]:
         """Apply the same relative crop window to image and full-res depth."""
-        cfg = self.config
+        cfg = self.cfg if hasattr(self, 'cfg') else self.config
         top, left, height, width = transforms.RandomResizedCrop.get_params(
             image,
             scale=list(cfg["random_crop_scale"]),
@@ -353,12 +375,24 @@ class PairedDepthAugmentation:
         return image, depth_cm
 
     def __call__(self, image: Tensor, depth_cm: Tensor) -> tuple[Tensor, Tensor]:
-        cfg = self.config
+        cfg = self.cfg if hasattr(self, 'cfg') else self.config
 
         if self.policy == "lemeter":
             # coin flip per sample: full meter OR full lejepa policy, never both
             chosen = self._meter if torch.rand(()) < cfg["meter_prob"] else self._lejepa
             return chosen(image, depth_cm)
+
+        if self.policy == 'lejepa_multi_view':
+            if torch.rand(()) < cfg["mirror"]:
+                image = torch.flip(image, dims=[-1])
+                depth_cm = torch.flip(depth_cm, dims=[-1])
+
+            if torch.rand(()) < cfg["random_crop"]:
+                image, depth_cm = self._joint_crop(image, depth_cm)
+
+            assert self.appearance is not None
+            image = self.appearance(image / 255.0) * 255.0
+            return image, depth_cm
 
         if self.policy == "lejepa":
             if torch.rand(()) < cfg["mirror"]:

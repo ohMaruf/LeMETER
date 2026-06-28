@@ -45,7 +45,7 @@ def pretrain_lejepa_encoder(
     logger.info(f"run directory: {output_dir}")
 
     raw_encoder = LeMeterEncoder(device, arch).to(device)
-    train_ds = AugmentedNyuDataset("train", globals.VIEWS, augmentation="lemeter", with_depth=True, normalization="imagenet")
+    train_ds = AugmentedNyuDataset("train", globals.VIEWS, augmentation="lejepa_multi_view", with_depth=True, normalization="imagenet")
     # shuffle is required: the manifest is grouped by scene (~178 frames per
     # scene), so without it every batch holds near-duplicate frames and the
     # SIGReg batch statistic degenerates
@@ -167,8 +167,20 @@ def pretrain_lejepa_encoder(
                 views = views.to(device, non_blocking=True)
                 emb, proj, _, feat_map = encoder(views)
 
-                proj_mean = proj.mean(0)
-                inv_loss = (proj_mean - proj).square().mean()
+                Vg = globals.GLOBAL_VIEWS
+                proj_g = proj[:Vg]
+                proj_l = proj[Vg:]
+
+                proj_g_mean = proj_g.mean(0)
+                inv_loss_l = (
+                    (proj_g_mean - proj_l).square().mean()
+                    if proj_l.numel() > 0 else 0.0
+                )
+                inv_loss_g = (proj_g_mean - proj_g).square().mean()
+                inv_loss = (
+                    globals.LAMBDA * inv_loss_l + globals.LAMBDA * inv_loss_g
+                )
+
                 sigreg_loss = sigreg(proj)
                 lejepa_loss = sigreg_loss * globals.LAMBDA + inv_loss * (1 - globals.LAMBDA)
 

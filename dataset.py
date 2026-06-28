@@ -155,8 +155,18 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
             # PairedDepthAugmentation applies spatial ops to both image and depth
             # and photometric ops to the image only; the resize gives every view
             # a common base size before the (optional) crop
-            self.paired_aug = PairedDepthAugmentation(augmentation)
             self.resize = v2.Resize(INPUT_RESOLUTION, antialias=True)
+            if augmentation == 'lejepa_multi_view':
+                self.paired_global_aug = PairedDepthAugmentation(
+                    augmentation,
+                    view_type='global'
+                )
+                self.paired_local_aug = PairedDepthAugmentation(
+                    augmentation,
+                    view_type='local'
+                )
+            else:
+                self.paired_aug = PairedDepthAugmentation(augmentation)
         else:
             if augmentation == 'lejepa_multi_view':
                 self.global_view_aug = ViewAugmentation(
@@ -188,6 +198,15 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         view, depth = self.paired_aug(image_255.clone(), depth_cm.clone())
         return self._normalize_image(view), F.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)
 
+    def _augmented_pair_with_aug(
+        self,
+        image_255: Tensor,
+        depth_cm: Tensor,
+        paired_aug: PairedDepthAugmentation
+    ):
+        view, depth = paired_aug(image_255.clone(), depth_cm.clone())
+        return self._normalize_image(view), F.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)
+
     def __getitem__(self, index: int) -> tuple[Tensor, Tensor] | Tensor:
         sample = self.samples.iloc[index]
 
@@ -197,9 +216,33 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
             image = self.resize(image)  # common base size so all views stack
 
             if self.views > 1:
-                pairs = [self._augmented_pair(image, depth) for _ in range(self.views)]
-                views, depths = zip(*pairs)
-                return torch.stack(views), torch.stack(depths)
+                if self.augmentation == 'lejepa_multi_view':
+                    Vg = globals.GLOBAL_VIEWS
+                    Vl = globals.LOCAL_VIEWS
+
+                    global_pairs = [
+                        self._augmented_pair_with_aug(
+                            image,
+                            depth,
+                            self.paired_global_aug
+                        )
+                        for _ in range(Vg)
+                    ]
+                    local_pairs = [
+                        self._augmented_pair_with_aug(
+                            image,
+                            depth,
+                            self.paired_local_aug
+                        )
+                        for _ in range(Vl)
+                    ]
+
+                    views, depths = zip(*(global_pairs + local_pairs))
+                    return torch.stack(views), torch.stack(depths)
+                else:
+                    pairs = [self._augmented_pair(image, depth) for _ in range(self.views)]
+                    views, depths = zip(*pairs)
+                    return torch.stack(views), torch.stack(depths)
 
             return self._normalize_image(image), F.adaptive_avg_pool2d(depth, OUTPUT_RESOLUTION)
 
