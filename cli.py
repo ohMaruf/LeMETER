@@ -56,7 +56,7 @@ def parse_cli_args() -> CliArgs:
     parser.add_argument(
         "--dataset",
         type=str,
-        choices=["nyu", "kitti"],
+        choices=["nyu", "kitti", "imagenet100"],
         default="nyu",
         help="the dataset to use",
     )

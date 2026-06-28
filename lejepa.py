@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 
 import globals
 import logger
-from dataset import AugmentedNyuDataset
+from dataset import AugmentedNyuDataset, ImageNet100Dataset
 from hardware_acceleration import Config, enable_hardware_acceleration
 from meter import LeMeterEncoder
 from sigreg import SigReg
@@ -26,6 +26,24 @@ RUNS_DIR = Path("runs")
 # periodic encoder snapshots, so we can later chart how the latent space (PCA
 # probing) and the downstream decoder performance evolve with pretraining length
 SNAPSHOT_EVERY = 5
+
+
+@torch.no_grad()
+def _evaluate_probe_accuracy(encoder, probe, loader, device) -> float:
+    """Top-1 of the online classification probe over a single-view loader. Adds a
+    view axis so the encoder's [N, V, ...] contract holds with V=1."""
+    encoder.eval(), probe.eval()
+    correct = 0
+    total = 0
+    for images, targets in loader:
+        images = images.to(device, non_blocking=True).unsqueeze(1)  # [B, 1, C, H, W]
+        targets = targets.to(device, non_blocking=True)
+        with torch.autocast(device.type, dtype=torch.bfloat16):
+            emb = encoder(images)[0]
+        logits = probe(emb.float())
+        correct += (logits.argmax(1) == targets).sum().item()
+        total += targets.numel()
+    return correct / max(total, 1)
 
 
 def pretrain_lejepa_encoder(
@@ -45,7 +63,20 @@ def pretrain_lejepa_encoder(
     logger.info(f"run directory: {output_dir}")
 
     raw_encoder = LeMeterEncoder(device, arch).to(device)
-    train_ds = AugmentedNyuDataset("train", globals.VIEWS, augmentation="lemeter", with_depth=True, normalization="imagenet")
+
+    # ImageNet-100 is the cross-domain SSL source (label-free objective); NYU is
+    # the in-domain source. They differ only in the *diagnostic* probe: depth has
+    # a dense per-pixel target, ImageNet has a class label.
+    is_imagenet = dataset == "imagenet100"
+    if is_imagenet:
+        train_ds = ImageNet100Dataset("train", views=globals.VIEWS, augmentation="lejepa", normalization="imagenet")
+        val_ds = ImageNet100Dataset("val", views=1, normalization="imagenet")
+        num_classes = int(train_ds.samples["label"].max()) + 1
+        logger.info(f"ImageNet-100 pretraining: {len(train_ds)} train / {len(val_ds)} val, {num_classes} classes")
+    else:
+        train_ds = AugmentedNyuDataset("train", globals.VIEWS, augmentation="lemeter", with_depth=True, normalization="imagenet")
+        val_ds = None
+
     # shuffle is required: the manifest is grouped by scene (~178 frames per
     # scene), so without it every batch holds near-duplicate frames and the
     # SIGReg batch statistic degenerates
@@ -64,15 +95,32 @@ def pretrain_lejepa_encoder(
         persistent_workers=True,
     )
 
-    # dense diagnostic probe: a 1x1 conv (per-pixel linear map) from the detached
-    # bottleneck features to depth. It never influences the encoder; its per-epoch
-    # R2 tracks how much *spatially structured* depth the features carry. The
-    # affine-free BatchNorm only standardizes the frozen features (no learnable
-    # depth-specific parameters).
-    probe = nn.Sequential(
-        nn.BatchNorm2d(embedding_dim, affine=False),
-        nn.Conv2d(embedding_dim, 1, kernel_size=1),
-    ).to(device)
+    # online diagnostic probe on the *detached* embedding: never influences the
+    # encoder, just tracks representation quality per epoch.
+    if is_imagenet:
+        # linear classification head (LayerNorm -> Linear), top-1 as the SSL
+        # quality signal — the depth probe has no target on ImageNet.
+        probe = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, num_classes),
+        ).to(device)
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=globals.BATCH_SIZE,
+            shuffle=False,
+            num_workers=min(globals.DATALOADER_WORKERS, os.cpu_count() or 1),
+            persistent_workers=True,
+        )
+    else:
+        # dense 1x1 conv (per-pixel linear map) from the detached bottleneck
+        # features to depth; its per-epoch R2 tracks how much *spatially
+        # structured* depth the features carry. The affine-free BatchNorm only
+        # standardizes the frozen features (no learnable depth-specific params).
+        probe = nn.Sequential(
+            nn.BatchNorm2d(embedding_dim, affine=False),
+            nn.Conv2d(embedding_dim, 1, kernel_size=1),
+        ).to(device)
+        val_loader = None
     sigreg = SigReg().to(device)
 
     g1 = {
@@ -100,7 +148,11 @@ def pretrain_lejepa_encoder(
         "sigreg_loss": [],
         "inv_loss": [],
         "lejepa_loss": [],
+        # depth path: per-epoch R2 of the dense probe. imagenet path: top-1 of the
+        # classification probe (probe_acc = val, probe_acc_train = streamed train).
         "probe_r2": [],
+        "probe_acc": [],
+        "probe_acc_train": [],
         # std of a random 1-D projection of the SIGReg output, averaged over the
         # epoch; SIGReg targets N(0,1), so this should climb to ~1.0. A plateau
         # well below 1 means the term is too weak — raise globals.LAMBDA.
@@ -155,6 +207,9 @@ def pretrain_lejepa_encoder(
         probe_y_sum = 0.0
         probe_y_sq = 0.0
         probe_count = 0
+        # classification probe (imagenet) streaming top-1
+        probe_correct = 0
+        probe_total = 0
         # streaming per-coordinate stats of the projection, to recover the
         # std of a random 1-D slice: E[Var(proj @ a)] = mean_j Var(proj_j)
         proj_sum = torch.zeros(embedding_dim, device=device)
@@ -172,19 +227,27 @@ def pretrain_lejepa_encoder(
                 sigreg_loss = sigreg(proj)
                 lejepa_loss = sigreg_loss * globals.LAMBDA + inv_loss * (1 - globals.LAMBDA)
 
-            # dense probe in fp32, on detached features: gradients flow only into
-            # the 1x1-conv head, never the encoder. each view's depth map is
-            # spatially aligned (with_depth=True) and normalized by the 10 m
-            # (1000 cm) sensor range.
-            depth = y.to(device, non_blocking=True).flatten(0, 1).float() / 1000.0
-            pred = probe(feat_map.detach().float())
-            # score on the probe's native (feature-map) grid: pool the GT down to
-            # the prediction rather than upsampling the coarse prediction up, so R2
-            # reflects depth decodable at the bottleneck resolution (and we skip a
-            # per-step interpolation).
-            depth = F.adaptive_avg_pool2d(depth, pred.shape[-2:])
-            valid = depth > 0  # zero == no sensor return, excluded from loss/metrics
-            probe_loss = F.mse_loss(pred[valid], depth[valid])
+            # diagnostic probe in fp32, on detached features: gradients flow only
+            # into the probe head, never the encoder.
+            if is_imagenet:
+                # one label per view; emb rows are ordered image0view0, image0view1,
+                # ..., so repeat_interleave(V) aligns labels to embeddings.
+                num_views = views.shape[1]
+                targets = y.to(device, non_blocking=True).repeat_interleave(num_views)
+                logits = probe(emb.detach().float())
+                probe_loss = F.cross_entropy(logits, targets)
+            else:
+                # each view's depth map is spatially aligned (with_depth=True) and
+                # normalized by the 10 m (1000 cm) sensor range.
+                depth = y.to(device, non_blocking=True).flatten(0, 1).float() / 1000.0
+                pred = probe(feat_map.detach().float())
+                # score on the probe's native (feature-map) grid: pool the GT down
+                # to the prediction rather than upsampling the coarse prediction up,
+                # so R2 reflects depth decodable at the bottleneck resolution (and
+                # we skip a per-step interpolation).
+                depth = F.adaptive_avg_pool2d(depth, pred.shape[-2:])
+                valid = depth > 0  # zero == no sensor return, excluded from loss/metrics
+                probe_loss = F.mse_loss(pred[valid], depth[valid])
 
             loss = lejepa_loss + probe_loss
             if not torch.isfinite(loss):
@@ -197,15 +260,19 @@ def pretrain_lejepa_encoder(
             proj_sq += flat_proj.square().sum(0)
             proj_count += flat_proj.shape[0]
 
-            v_pred = pred[valid].detach()
-            v_depth = depth[valid]
             epoch_sigreg += sigreg_loss.item()
             epoch_inv += inv_loss.item()
             epoch_lejepa += lejepa_loss.item()
-            probe_ss_res += (v_pred - v_depth).square().sum().item()
-            probe_y_sum += v_depth.sum().item()
-            probe_y_sq += v_depth.square().sum().item()
-            probe_count += v_depth.numel()
+            if is_imagenet:
+                probe_correct += (logits.detach().argmax(1) == targets).sum().item()
+                probe_total += targets.numel()
+            else:
+                v_pred = pred[valid].detach()
+                v_depth = depth[valid]
+                probe_ss_res += (v_pred - v_depth).square().sum().item()
+                probe_y_sum += v_depth.sum().item()
+                probe_y_sq += v_depth.square().sum().item()
+                probe_count += v_depth.numel()
 
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
@@ -216,10 +283,6 @@ def pretrain_lejepa_encoder(
             scheduler.step()
 
 
-        # streaming R2 over the epoch: 1 - SS_res / SS_tot
-        probe_ss_tot = probe_y_sq - probe_y_sum**2 / max(probe_count, 1)
-        probe_r2 = 1.0 - probe_ss_res / max(probe_ss_tot, 1e-12)
-
         # E[std of a random unit-direction slice] = sqrt(mean_j Var(proj_j))
         proj_var = (proj_sq / proj_count - (proj_sum / proj_count).square()).clamp_min(0.0)
         proj_sigma = proj_var.mean().sqrt().item()
@@ -227,13 +290,23 @@ def pretrain_lejepa_encoder(
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/lejepa {epoch_lejepa / len(train)}")
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/invariance {epoch_inv / len(train)}")
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/sigreg {epoch_sigreg / len(train)}")
-        logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/probe_r2 {probe_r2:.4f}")
+        if is_imagenet:
+            probe_acc_train = probe_correct / max(probe_total, 1)
+            probe_acc = _evaluate_probe_accuracy(encoder, probe, val_loader, device)
+            logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/probe_acc {probe_acc:.4f} (val top-1, train {probe_acc_train:.4f})")
+            history["probe_acc"].append(probe_acc)
+            history["probe_acc_train"].append(probe_acc_train)
+        else:
+            # streaming R2 over the epoch: 1 - SS_res / SS_tot
+            probe_ss_tot = probe_y_sq - probe_y_sum**2 / max(probe_count, 1)
+            probe_r2 = 1.0 - probe_ss_res / max(probe_ss_tot, 1e-12)
+            logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/probe_r2 {probe_r2:.4f}")
+            history["probe_r2"].append(probe_r2)
         logger.info(f"[{epoch + 1}/{globals.PRETRAIN_EPOCHS}] pretrain/proj_sigma {proj_sigma:.4f} (target 1.0)")
 
         history["sigreg_loss"].append(epoch_sigreg / len(train))
         history["inv_loss"].append(epoch_inv / len(train))
         history["lejepa_loss"].append(epoch_lejepa / len(train))
-        history["probe_r2"].append(probe_r2)
         history["proj_sigma"].append(proj_sigma)
         history["lr"].append(scheduler.get_last_lr()[0])
         history["grad_norm"].append(epoch_grad_norm / len(train))

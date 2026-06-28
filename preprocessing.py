@@ -290,8 +290,229 @@ def preprocess_nyu_depth_v2() -> None:
     logger.info(f"Preprocessing of {NYU_DATASET_NAME} is complete")
 
 
+# --------------------------------------------------------------------------- #
+# ImageNet-100 (SSL pretraining source)
+# --------------------------------------------------------------------------- #
+# Aspect-preserving resize so the shorter side equals the long edge of the crop
+# target (256 = max(INPUT_RESOLUTION)). This keeps the whole image (no on-disk
+# crop), so the train-time RandomResizedCrop(192x256) can sample diverse
+# sub-regions with minimal upsampling, while cutting disk/decode cost vs storing
+# full-res JPEGs. Aspect ratio is normalized at train time by the crop, not here.
+IMAGENET100_DATASET_NAME = "imagenet100"
+IMAGENET100_HANDLE = "ambityga/imagenet100"
+IMAGENET100_PREPROCESSED_ROOT = Path("preprocessed_datasets/imagenet100")
+IMAGENET100_COMPLETE_MARKER = Path("preprocessed_datasets/.complete") / IMAGENET100_DATASET_NAME
+IMAGENET100_STATS_PATH = IMAGENET100_PREPROCESSED_ROOT / "stats.json"
+IMAGENET100_LABELS_PATH = IMAGENET100_PREPROCESSED_ROOT / "labels.json"
+IMAGENET100_SHORT_SIDE = max(INPUT_RESOLUTION)  # 256
+IMAGENET100_JPEG_QUALITY = 90
+IMAGENET100_WORKER_COUNT = os.cpu_count() or 1
+IMAGENET100_CHUNK_SIZE = 256
+IMAGENET100_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png"}
+# wnid subfolders live under these top-level dirs in the kaggle archive
+IMAGENET100_TRAIN_DIR_GLOB = "train*"
+IMAGENET100_VAL_DIR_GLOB = "val*"
+
+# (absolute source path, wnid, label index)
+ImageNetSample = tuple[str, str, int]
+# (relative output path, label index, wnid)
+ImageNetRow = tuple[str, int, str]
+
+
+def _resolve_imagenet100_raw_root() -> Path:
+    """Locate the extracted kaggle archive (cached download, no re-fetch)."""
+    import kagglehub
+
+    return Path(kagglehub.dataset_download(IMAGENET100_HANDLE))
+
+
+def _list_class_dirs(raw_root: Path, dir_glob: str) -> list[Path]:
+    """All wnid subfolders under top-level dirs matching `dir_glob` (the archive
+    spreads the train classes across train.X1..X4)."""
+    class_dirs: list[Path] = []
+    for top in sorted(raw_root.glob(dir_glob)):
+        if top.is_dir():
+            class_dirs.extend(child for child in sorted(top.iterdir()) if child.is_dir())
+    return class_dirs
+
+
+def _build_wnid_index(raw_root: Path) -> dict[str, int]:
+    wnids = sorted({d.name for d in _list_class_dirs(raw_root, IMAGENET100_TRAIN_DIR_GLOB)})
+    if not wnids:
+        raise FileNotFoundError(
+            f"No train class folders found under {raw_root} (looked for "
+            f"'{IMAGENET100_TRAIN_DIR_GLOB}/<wnid>/'); is the archive extracted?"
+        )
+    return {wnid: index for index, wnid in enumerate(wnids)}
+
+
+def _collect_imagenet_samples(raw_root: Path, dir_glob: str, wnid_to_idx: dict[str, int]) -> list[ImageNetSample]:
+    samples: list[ImageNetSample] = []
+    for class_dir in _list_class_dirs(raw_root, dir_glob):
+        wnid = class_dir.name
+        if wnid not in wnid_to_idx:
+            continue  # a val-only class with no train index; skip
+        label = wnid_to_idx[wnid]
+        for file in sorted(class_dir.iterdir()):
+            if file.suffix.lower() in IMAGENET100_IMAGE_EXTENSIONS:
+                samples.append((str(file), wnid, label))
+    return samples
+
+
+def _resize_short_side(image: Image.Image, short_side: int) -> Image.Image:
+    width, height = image.size
+    scale = short_side / min(width, height)
+    if scale == 1.0:
+        return image
+    new_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return image.resize(new_size, resample=Image.Resampling.BICUBIC)
+
+
+def preprocess_imagenet100_chunk(
+    samples: list[ImageNetSample],
+    split: str,
+    *,
+    collect_stats: bool,
+) -> dict[str, object]:
+    torch.set_num_threads(1)
+    stats = ChannelStats()
+    rows: list[ImageNetRow] = []
+    for source_path, wnid, label in samples:
+        with Image.open(source_path) as image:
+            rgb = image.convert("RGB")
+            resized = _resize_short_side(rgb, IMAGENET100_SHORT_SIDE)
+
+            relative_path = Path(split) / wnid / (Path(source_path).stem + ".jpg")
+            destination = IMAGENET100_PREPROCESSED_ROOT / relative_path
+            _ensure_dir(destination.parent)
+            resized.save(destination, format="JPEG", quality=IMAGENET100_JPEG_QUALITY)
+
+            if collect_stats:
+                stats.update(to_tensor(resized) * 255)
+
+        rows.append((relative_path.as_posix(), label, wnid))
+
+    return {
+        "processed_count": len(samples),
+        "rows": rows,
+        "stats": stats.to_payload() if collect_stats else None,
+    }
+
+
+def _preprocess_imagenet100_split(
+    samples: list[ImageNetSample],
+    *,
+    split: str,
+    collect_stats: bool,
+) -> tuple[list[ImageNetRow], ChannelStats | None]:
+    rows: list[ImageNetRow] = []
+    stats = ChannelStats() if collect_stats else None
+    if not samples:
+        return rows, stats
+
+    logger.info(f"Preprocessing {split} split of {IMAGENET100_DATASET_NAME} ({len(samples)} images)...")
+    chunks = [
+        samples[index : index + IMAGENET100_CHUNK_SIZE]
+        for index in range(0, len(samples), IMAGENET100_CHUNK_SIZE)
+    ]
+
+    with ProcessPoolExecutor(max_workers=IMAGENET100_WORKER_COUNT) as executor:
+        futures = [
+            executor.submit(preprocess_imagenet100_chunk, chunk, split, collect_stats=collect_stats)
+            for chunk in chunks
+        ]
+        with tqdm(total=len(samples), desc=split) as progress:
+            for future in as_completed(futures):
+                result = future.result()
+                progress.update(int(result["processed_count"]))
+                rows.extend(result["rows"])
+                if collect_stats and stats is not None and result["stats"] is not None:
+                    stats.merge(ChannelStats.from_payload(result["stats"]))
+
+    rows.sort()  # deterministic manifest order regardless of future completion
+    return rows, stats
+
+
+def _write_imagenet100_manifest(rows: list[ImageNetRow], split: str) -> Path:
+    csv_path = IMAGENET100_PREPROCESSED_ROOT / f"{split}.csv"
+    _ensure_dir(csv_path.parent)
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["image_path", "label", "wnid"])
+        writer.writerows(rows)
+    return csv_path
+
+
+def _write_imagenet100_labels(raw_root: Path, wnid_to_idx: dict[str, int]) -> Path:
+    # Labels.json (wnid -> human-readable name) ships with the archive; tolerate
+    # its absence by falling back to the wnid as the name.
+    human_names: dict[str, str] = {}
+    labels_file = next(iter(raw_root.glob("Labels.json")), None)
+    if labels_file is not None:
+        human_names = json.loads(labels_file.read_text(encoding="utf-8"))
+
+    payload = {
+        str(index): {"wnid": wnid, "name": human_names.get(wnid, wnid)}
+        for wnid, index in wnid_to_idx.items()
+    }
+    _ensure_dir(IMAGENET100_LABELS_PATH.parent)
+    IMAGENET100_LABELS_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return IMAGENET100_LABELS_PATH
+
+
+def _write_imagenet100_stats(stats: ChannelStats) -> Path:
+    _ensure_dir(IMAGENET100_STATS_PATH.parent)
+    payload = {
+        "dataset": IMAGENET100_DATASET_NAME,
+        "split": "train",
+        "short_side": IMAGENET100_SHORT_SIDE,
+        **stats.as_dict(),
+    }
+    IMAGENET100_STATS_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return IMAGENET100_STATS_PATH
+
+
+def preprocess_imagenet100() -> None:
+    if IMAGENET100_COMPLETE_MARKER.exists():
+        logger.info(
+            f"Skipping {IMAGENET100_DATASET_NAME}: completion marker exists at {IMAGENET100_COMPLETE_MARKER}"
+        )
+        return
+
+    raw_root = _resolve_imagenet100_raw_root()
+    logger.info(f"Found {IMAGENET100_DATASET_NAME} archive at {raw_root}")
+
+    wnid_to_idx = _build_wnid_index(raw_root)
+    logger.info(f"Discovered {len(wnid_to_idx)} classes")
+
+    train_samples = _collect_imagenet_samples(raw_root, IMAGENET100_TRAIN_DIR_GLOB, wnid_to_idx)
+    val_samples = _collect_imagenet_samples(raw_root, IMAGENET100_VAL_DIR_GLOB, wnid_to_idx)
+
+    train_rows, train_stats = _preprocess_imagenet100_split(train_samples, split="train", collect_stats=True)
+    val_rows, _ = _preprocess_imagenet100_split(val_samples, split="val", collect_stats=False)
+
+    _write_imagenet100_manifest(train_rows, "train")
+    _write_imagenet100_manifest(val_rows, "val")
+    labels_path = _write_imagenet100_labels(raw_root, wnid_to_idx)
+
+    if train_stats is None:
+        raise ValueError("Train stats were not collected")
+    stats_path = _write_imagenet100_stats(train_stats)
+
+    IMAGENET100_COMPLETE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    IMAGENET100_COMPLETE_MARKER.write_text("complete\n", encoding="utf-8")
+
+    logger.info(
+        f"Preprocessed {len(train_rows)} train + {len(val_rows)} val images into "
+        f"{IMAGENET100_PREPROCESSED_ROOT}"
+    )
+    logger.info(f"Wrote manifests, {labels_path.name} and {stats_path.name}")
+    logger.info(f"Preprocessing of {IMAGENET100_DATASET_NAME} is complete")
+
+
 def preprocess_datasets() -> None:
     preprocess_nyu_depth_v2()
+    preprocess_imagenet100()
 
 
 if __name__ == "__main__":

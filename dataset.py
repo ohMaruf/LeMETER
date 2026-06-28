@@ -202,6 +202,77 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
 
 
 
+class ImageNet100Dataset(Dataset):
+    """ImageNet-100 for LeJEPA SSL pretraining (label-free objective; the integer
+    class label is returned only for an optional online classification probe).
+
+    Mirrors AugmentedNyuDataset's view-stacking contract: with ``views > 1`` each
+    item is ``(views[V, C, H, W], label)`` of independently augmented crops; with
+    ``views == 1`` it is a single deterministic eval view ``(image[C, H, W],
+    label)``. Stored images are short-side ``max(INPUT_RESOLUTION)``; the lejepa
+    RandomResizedCrop produces the final 192x256 views, matching NYU finetuning.
+    """
+
+    root = Path("preprocessed_datasets/imagenet100")
+
+    def __init__(
+        self,
+        split: Literal["train", "val"] = "train",
+        views: int = 1,
+        augmentation: AugmentationPolicy = "lejepa",
+        normalization: Literal["imagenet", "dataset"] = "imagenet",
+    ) -> None:
+        super().__init__()
+        if not self.root.exists():
+            raise FileNotFoundError(
+                f"ImageNet-100 not preprocessed: {self.root} is missing "
+                f"(run `python preprocessing.py imagenet100`)"
+            )
+        self.split = split
+        self.views = views
+        self.augmentation = augmentation
+        self.samples = pd.read_csv(self.root / f"{split}.csv")
+
+        if normalization == "imagenet":
+            self.zscore_normalize = v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        else:
+            stats = json.loads((self.root / "stats.json").read_text(encoding="utf-8"))
+            self.zscore_normalize = v2.Normalize(
+                tuple(float(v) for v in stats["mean_rgb"]),
+                tuple(float(v) for v in stats["std_rgb"]),
+            )
+
+        self.view_aug = ViewAugmentation(augmentation, self.zscore_normalize)
+        # deterministic eval view: short side -> 256, center crop to 192x256
+        self.test = v2.Compose(
+            [
+                v2.ToImage(),
+                v2.Resize(max(INPUT_RESOLUTION), antialias=True),
+                v2.CenterCrop(INPUT_RESOLUTION),
+                v2.ToDtype(FLOATING_PRECISION, scale=True),
+                self.zscore_normalize,
+            ]
+        )
+
+    def __len__(self) -> int:
+        return self.samples.shape[0]
+
+    def _load_uint8(self, relative_path: str) -> Tensor:
+        with Image.open(self.root / relative_path) as image:
+            return TF.pil_to_tensor(image.convert("RGB"))
+
+    def __getitem__(self, index: int) -> tuple[Tensor, int]:
+        sample = self.samples.iloc[index]
+        image = self._load_uint8(sample["image_path"])
+        label = int(sample["label"])
+
+        if self.views > 1:
+            views = torch.stack([self.view_aug(image) for _ in range(self.views)])
+            return views, label
+
+        return self.test(image), label
+
+
 class DepthTrainDataset(NormalizedNyuDataset):
     def __init__(self, split, augment: bool, augmentation: AugmentationPolicy = "meter", normalization: Literal["imagenet", "dataset"] = "dataset"):
         super().__init__(split, normalization=normalization, holdout_val=True)
