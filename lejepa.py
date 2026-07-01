@@ -169,7 +169,7 @@ def pretrain_lejepa_encoder(
 
                 Vg = globals.GLOBAL_VIEWS
                 proj_g = proj[:Vg]
-                proj_l = proj[Vg:]
+                proj_l = proj
 
                 proj_g_mean = proj_g.mean(0)
                 inv_loss_l = (
