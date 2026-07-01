@@ -22,19 +22,19 @@ from meter import Meter, MeterArchitecture
 RUNS_DIR = Path("runs")
 DECODER_BATCH_SIZE = 128
 WEIGHT_DECAY = 1e-2
-LR_DECAY_STEP = 5
-LR_DECAY_GAMMA = 0.316
+LR_DECAY_STEP = 20
+LR_DECAY_GAMMA = 0.1
 
 SCHEDULE_EPOCHS = {
-    "freeze_encoder": 30,
-    "finetune": 30,
-    "warm_start": 35,
+    "freeze_encoder": 60,
+    "finetune": 60,
+    "warm_start": 65,
 }
 
 # Initial learning rates for each schedule (encoder, decoder)
 INITIAL_LRS = {
     "freeze_encoder": (0.0, 1e-3),
-    "finetune": (1e-4, 1e-3),
+    "finetune": (1e-3, 1e-3),
     "warm_start": (1e-3, 1e-3),  # encoder frozen for first 5 epochs
 }
 
