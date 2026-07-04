@@ -202,7 +202,7 @@ def train_decoder(
             loss_depth, loss_ssim, loss_normal, loss_grad = loss_fn(z.float(), y)
             loss = loss_depth + loss_ssim + loss_normal + loss_grad
             if not torch.isfinite(loss):
-                msg = f"Invalid loss {loss.item()} at epoch {epoch}"
+                msg = f"Invalid loss {loss.item()} at epoch {epoch + 1}"
                 logger.error(msg)
                 raise RuntimeError(msg)
 
@@ -223,10 +223,10 @@ def train_decoder(
 
         train_loss = epoch_loss / len(train)
         metrics = evaluate(raw_model, val, device)
-        logger.info(f"[{epoch}/{total_epochs}] train/loss {train_loss:.4f}")
-        logger.info(f"[{epoch}/{total_epochs}] val/RMSE  {metrics['rmse']:.3f}m")
-        logger.info(f"[{epoch}/{total_epochs}] val/REL {metrics['rel']:.3f}")
-        logger.info(f"[{epoch}/{total_epochs}] val/d1 {metrics['delta1']:.3f}")
+        logger.info(f"[{epoch + 1}/{total_epochs}] train/loss {train_loss:.4f}")
+        logger.info(f"[{epoch + 1}/{total_epochs}] val/RMSE  {metrics['rmse']:.3f}m")
+        logger.info(f"[{epoch + 1}/{total_epochs}] val/REL {metrics['rel']:.3f}")
+        logger.info(f"[{epoch + 1}/{total_epochs}] val/d1 {metrics['delta1']:.3f}")
 
         history["train_loss"].append(train_loss)
         for component, total in epoch_components.items():
@@ -258,7 +258,7 @@ def train_decoder(
         temp_path.replace(checkpoint_path)
         if is_best:
             torch.save(checkpoint, best_checkpoint_path)
-            logger.info(f"[{epoch}/{total_epochs}] new best val/RMSE {best_rmse:.3f}m")
+            logger.info(f"[{epoch + 1}/{total_epochs}] new best val/RMSE {best_rmse:.3f}m")
 
         with open(output_dir / "losses.json", "w") as losses_file:
             json.dump(history, losses_file)
