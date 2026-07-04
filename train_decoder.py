@@ -80,7 +80,13 @@ def get_dataloaders():
         shuffle=False,
         num_workers=min(globals.DATALOADER_WORKERS, os.cpu_count() or 1),
     )
-    return train, val
+    test = DataLoader(
+        NormalizedNyuDataset("test"),
+        batch_size=16,
+        shuffle=False,
+        num_workers=min(globals.DATALOADER_WORKERS, os.cpu_count() or 1),
+    )
+    return train, val, test
 
 def train_decoder(
         run_name: str,
@@ -109,7 +115,7 @@ def train_decoder(
     logger.info(f"schedule: {schedule}, epochs: {total_epochs}")
 
     raw_model = build_encoder_model(device, arch, encoder_checkpoint_path, train_encoder)
-    train, val = get_dataloaders()
+    train, val, test = get_dataloaders()
 
     # Optimizer with separate groups and initial LRs
     param_groups = [
@@ -252,9 +258,23 @@ def train_decoder(
         temp_path.replace(checkpoint_path)
         if is_best:
             torch.save(checkpoint, best_checkpoint_path)
+            logger.info(f"[{epoch}/{total_epochs}] new best val/RMSE {best_rmse:.3f}m")
 
         with open(output_dir / "losses.json", "w") as losses_file:
             json.dump(history, losses_file)
+
+    if best_checkpoint_path.exists():
+        best_ckpt = torch.load(best_checkpoint_path, map_location=device)
+        raw_model.load_state_dict(best_ckpt["model_state"])
+        logger.info(f"loaded best checkpoint (epoch {best_ckpt['epoch']}) for test eval")
+
+    test_metrics = evaluate(raw_model, test, device)
+    logger.info(f"[final] test/RMSE  {test_metrics['rmse']:.3f}m")
+    logger.info(f"[final] test/REL {test_metrics['rel']:.3f}")
+    logger.info(f"[final] test/d1 {test_metrics['delta1']:.3f}")
+
+    with open(output_dir / "test_metrics.json", "w") as test_file:
+        json.dump(test_metrics, test_file)
 
 def main():
     from cli import parse_cli_args
