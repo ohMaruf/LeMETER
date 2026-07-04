@@ -66,7 +66,7 @@ def build_encoder_model(
 
 def get_dataloaders():
     train = DataLoader(
-        DepthTrainDataset("train", augment=True),
+        DepthTrainDataset("train", augment=True, augmentation="meter", normalization="imagenet"),
         batch_size=DECODER_BATCH_SIZE,
         shuffle=True,
         drop_last=True,
@@ -75,13 +75,13 @@ def get_dataloaders():
         persistent_workers=True,
     )
     val = DataLoader(
-        NormalizedNyuDataset("val"),
+        NormalizedNyuDataset("val", normalization="imagenet"),
         batch_size=16,
         shuffle=False,
         num_workers=min(globals.DATALOADER_WORKERS, os.cpu_count() or 1),
     )
     test = DataLoader(
-        NormalizedNyuDataset("test"),
+        NormalizedNyuDataset("test", normalization="imagenet"),
         batch_size=16,
         shuffle=False,
         num_workers=min(globals.DATALOADER_WORKERS, os.cpu_count() or 1),
