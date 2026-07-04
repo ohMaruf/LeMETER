@@ -49,7 +49,7 @@ class NormalizedNyuDataset(Dataset):
         self,
         split: Split,
         holdout_val: bool = True,
-        normalization: Literal["imagenet", "dataset"] = "dataset",
+        normalization: Literal["imagenet", "dataset"] = "imagenet",
     ) -> None:
         super().__init__()
         self.split = split
@@ -138,7 +138,7 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
         split: Split,
         views=1,
         augmentation: AugmentationPolicy = "lejepa",
-        normalization: Literal["imagenet", "dataset"] = "dataset",
+        normalization: Literal["imagenet", "dataset"] = "imagenet",
         with_depth: bool = False,
     ) -> None:
         super().__init__(split, holdout_val=False, normalization=normalization)
@@ -263,7 +263,7 @@ class AugmentedNyuDataset(NormalizedNyuDataset):
 
 
 class DepthTrainDataset(NormalizedNyuDataset):
-    def __init__(self, split, augment: bool, augmentation: AugmentationPolicy = "meter", normalization: Literal["imagenet", "dataset"] = "dataset"):
+    def __init__(self, split, augment: bool, augmentation: AugmentationPolicy = "meter", normalization: Literal["imagenet", "dataset"] = "imagenet"):
         super().__init__(split, normalization=normalization, holdout_val=True)
         self.augment = augment
         self.aug = PairedDepthAugmentation(augmentation)
