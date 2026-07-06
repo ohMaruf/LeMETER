@@ -40,10 +40,6 @@ def parse_args():
     return args
 
 
-# --------------------------------------------------------------------------- #
-# Encoders and feature extraction
-# --------------------------------------------------------------------------- #
-
 def build_encoders(device: torch.device, dataset: DepthDataset, arch: MeterArchitecture) -> dict[str, MobileViT]:
     encoders = {
         "lejepa": LeMeterEncoder.load(device, dataset, arch).encoder,
@@ -78,10 +74,6 @@ def extract_features(encoder, loader, device, limit=0, desc="extracting features
     return feats, torch.cat(depths)[: limit or None]
 
 
-# --------------------------------------------------------------------------- #
-# PCA and metrics
-# --------------------------------------------------------------------------- #
-
 def flatten_patches(feature_maps: torch.Tensor) -> torch.Tensor:
     # [N, C, h, w] -> [N * h * w, C]
     return feature_maps.permute(0, 2, 3, 1).reshape(-1, feature_maps.shape[1])
@@ -114,7 +106,6 @@ def spearman(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 def median_split_iou(pc_map: torch.Tensor, depth_map: torch.Tensor) -> float:
-    """Agreement between a far/near split of depth and a PC1 split (sign-invariant)."""
     far = depth_map > depth_map.median()
     positive = pc_map > pc_map.median()
     iou_a = (far & positive).sum() / (far | positive).sum().clamp_min(1)
@@ -123,15 +114,6 @@ def median_split_iou(pc_map: torch.Tensor, depth_map: torch.Tensor) -> float:
 
 
 def mutual_information(x: torch.Tensor, y: torch.Tensor, bins: int = MI_BINS) -> float:
-    """Mutual information (bits) between two flat tensors.
-
-    MI captures *any* dependence, not just the monotonic part Spearman sees, so
-    it rewards a PC that segments depth planes even when the relationship is not
-    rank-consistent. Both inputs are discretized into equal-frequency (quantile)
-    bins, which makes the estimate invariant to their arbitrary scales and keeps
-    every marginal bin populated — unlike equal-width binning, which on skewed
-    features leaves most cells empty and biases MI upward. Range: [0, log2(bins)].
-    """
     x_bin, y_bin = _quantile_bin(x, bins), _quantile_bin(y, bins)
     joint = torch.zeros(bins, bins)
     joint.index_put_((x_bin, y_bin), torch.ones_like(x_bin, dtype=torch.float), accumulate=True)
@@ -143,7 +125,6 @@ def mutual_information(x: torch.Tensor, y: torch.Tensor, bins: int = MI_BINS) ->
 
 
 def _quantile_bin(values: torch.Tensor, bins: int) -> torch.Tensor:
-    """Map values to equal-frequency bin indices [0, bins) by rank."""
     ranks = values.argsort().argsort()
     return (ranks * bins // values.numel()).clamp_max_(bins - 1)
 
@@ -170,7 +151,6 @@ def ridge_probe(X_train, y_train, X_test, y_test, alpha=1e-1):
 
 
 def analyze_level(feats: torch.Tensor, depths: torch.Tensor) -> tuple[dict, dict]:
-    """Per-encoder-level PCA metrics + artifacts needed for figures."""
     n, c, h, w = feats.shape
     mean, eigenvalues, eigenvectors = fit_pca(flatten_patches(feats))
 
@@ -216,10 +196,6 @@ def pooled_spectrum(feats_final: torch.Tensor) -> tuple[torch.Tensor, dict]:
         "pooled_dim": pooled.shape[1],
     }
 
-
-# --------------------------------------------------------------------------- #
-# Visualization helpers (analysis side: prepare render-ready arrays)
-# --------------------------------------------------------------------------- #
 
 def robust_rgb(projection: torch.Tensor) -> torch.Tensor:
     """[3, h, w] PC projections -> [h, w, 3] in [0, 1] via per-channel 2-98 pct."""
@@ -282,7 +258,7 @@ def write_report(metrics: dict, output: Path):
         "",
         f"arch=`{metrics['arch']}` dataset=`{metrics['dataset']}` images=`{metrics['num_images']}`",
         "",
-        "| encoder | level | erank (patch) | top-3 var | best-PC |rho| | PC1 |rho| | fg/bg IoU | MI best | probe R2 | probe RMSE (m) |",
+        "| encoder | level | erank (patch) | top-3 var | best-PC \|rho\| | PC1 \|rho\| | fg/bg IoU | MI best | probe R2 | probe RMSE (m) |",
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name, encoder_metrics in metrics["encoders"].items():

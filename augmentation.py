@@ -1,26 +1,3 @@
-"""Augmentation policies for LeMETER.
-
-All augmentation lives here (kept out of dataset.py) and every tunable is a
-named constant in the POLICIES block below — no magic numbers buried in the
-pipeline, and normalization is passed in (dataset-specific) rather than the
-hard-coded ImageNet stats of the original draft.
-
-Three view-generation policies, selected by name:
-  - "lejepa":  SSL/DINO-style — aggressive crops + strong photometric jitter.
-               Invariance to these is the only training signal.
-  - "meter":   the conservative supervised METER policy used as SSL views.
-  - "lemeter": stochastic mix — each view independently and randomly picks
-               between "meter" augmentation OR "lejepa" augmentation,
-               but not both together.
-
-Design principles (inherited from the draft):
-  - APPEARANCE is aggressive: depth is invariant to color / brightness / blur.
-  - SPATIAL is moderate: depth IS sensitive to location, so no wild crops.
-  - The METER policy mirrors AND vertical-flips (as in the paper); the lejepa
-    policy keeps the original DINO crops + horizontal flip only.
-  - depth-scale shift requires labels, so it only runs in the paired path.
-"""
-
 from typing import Literal
 
 import torch
@@ -33,14 +10,7 @@ from globals import INPUT_RESOLUTION, FLOATING_PRECISION
 
 AugmentationPolicy = Literal["lejepa", "lejepa_multi_view", "meter", "lemeter"]
 
-# ---------------------------------------------------------------------------
-# Augmentation parameters
-# ---------------------------------------------------------------------------
-# Every random transform fires with the listed probability. Crop area is the
-# fraction of the image kept (torchvision's RandomResizedCrop `scale`), ratio is
-# the aspect-ratio range. The METER "shifting strategy" applies gamma,
-# brightness and per-channel color multipliers; in the paired path it also
-# shifts the depth label by depth_shift_cm centimeters.
+# Augmentation Hyperparameters
 LEJEPA = {
     "mirror": 0.5,
     "vertical_flip": 0.5,
@@ -119,15 +89,7 @@ POLICIES: dict[AugmentationPolicy, dict] = {
 }
 
 
-
-# ---------------------------------------------------------------------------
-# Low-level METER ops
-# ---------------------------------------------------------------------------
 def meter_channel_swap(image: Tensor) -> Tensor:
-    """METER 'channel swap': replace the RGB channels with a random length-3
-    selection (with replacement) from {R, G, B}. augmentation.py's original
-    picks one triple uniformly from product([0, 1, 2], repeat=3), which is
-    exactly a uniform draw over {0, 1, 2}^3."""
     indices = torch.randint(0, 3, (3,))
     return image[indices]
 
@@ -139,9 +101,6 @@ def meter_photometric_jitter(
     color_range: tuple[float, float],
     max_value: float,
 ) -> Tensor:
-    """Image part of METER's 'shifting strategy': gamma, brightness and
-    per-channel color multipliers. The original ran on the 0-255 scale
-    (max_value=255); the lemeter view path runs it on [0, 1] (max_value=1)."""
     gamma = float(torch.empty(()).uniform_(*gamma_range))
     brightness = float(torch.empty(()).uniform_(*brightness_range))
     colors = torch.empty(3, 1, 1).uniform_(*color_range)
@@ -149,16 +108,8 @@ def meter_photometric_jitter(
     return (base.pow(gamma) * brightness * colors).clamp(0.0, max_value)
 
 
-# ---------------------------------------------------------------------------
-# View augmentation (SSL, image only)
-# ---------------------------------------------------------------------------
+
 class ViewAugmentation:
-    """Produce one augmented, normalized view from a uint8 CHW image tensor.
-
-    `normalize` is the dataset's z-score transform (v2.Normalize), applied last
-    so the channel swap / shifting strategy operate on un-normalized pixels.
-    """
-
     def __init__(
         self,
         policy: AugmentationPolicy,
@@ -289,26 +240,8 @@ class ViewAugmentation:
         return self.normalize(view)
 
 
-# ---------------------------------------------------------------------------
-# Paired image + depth augmentation (supervised decoder training)
-# ---------------------------------------------------------------------------
+# Paired image + depth augmentation for supervised decoder training
 class PairedDepthAugmentation:
-    """Jointly augment an image (float CHW in [0, 255] at INPUT_RESOLUTION) and
-    its depth label (cm, full resolution). Spatial ops apply to both; the
-    photometric ops and channel swap touch the image only; the depth-scale
-    shift touches the label only. The caller normalizes the image afterwards.
-
-    Three policies, mirroring the SSL view path:
-      - "meter":   METER reference order — mirror, channel swap, joint crop,
-                   shifting strategy (with depth-scale shift). Its leading
-                   'random flipping' op was a no-op slice, so it is omitted
-                   (no vertical flip).
-      - "lejepa":  joint mirror + always-on crop, then DINO appearance
-                   corruption (color jitter, grayscale, blur, solarize) on the
-                   image only. Depth is never photometrically touched.
-      - "lemeter": randomly decide if to apply meter or lejepa augmentation.
-    """
-
     def __init__(
         self,
         policy: AugmentationPolicy = "meter",

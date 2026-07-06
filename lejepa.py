@@ -101,9 +101,6 @@ def pretrain_lejepa_encoder(
         "inv_loss": [],
         "lejepa_loss": [],
         "probe_r2": [],
-        # std of a random 1-D projection of the SIGReg output, averaged over the
-        # epoch; SIGReg targets N(0,1), so this should climb to ~1.0. A plateau
-        # well below 1 means the term is too weak — raise globals.LAMBDA.
         "proj_sigma": [],
         "lr": [],
         "grad_norm": [],
@@ -169,30 +166,19 @@ def pretrain_lejepa_encoder(
 
                 Vg = globals.GLOBAL_VIEWS
                 proj_g = proj[:Vg]
-                proj_l = proj
+                proj_all = proj
 
                 proj_g_mean = proj_g.mean(0)
-                inv_loss_l = (
-                    (proj_g_mean - proj_l).square().mean()
-                    if proj_l.numel() > 0 else 0.0
+                inv_loss = (
+                    (proj_g_mean - proj_all).square().mean()
+                    if proj_all.numel() > 0 else 0.0
                 )
-                # inv_loss_g = (proj_g_mean - proj_g).square().mean()
-                # inv_loss = inv_loss_l + inv_loss_g
-                inv_loss = inv_loss_l
 
                 sigreg_loss = sigreg(proj)
                 lejepa_loss = sigreg_loss * globals.LAMBDA + inv_loss * (1 - globals.LAMBDA)
 
-            # dense probe in fp32, on detached features: gradients flow only into
-            # the 1x1-conv head, never the encoder. each view's depth map is
-            # spatially aligned (with_depth=True) and normalized by the 10 m
-            # (1000 cm) sensor range.
             depth = y.to(device, non_blocking=True).flatten(0, 1).float() / 1000.0
             pred = probe(feat_map.detach().float())
-            # score on the probe's native (feature-map) grid: pool the GT down to
-            # the prediction rather than upsampling the coarse prediction up, so R2
-            # reflects depth decodable at the bottleneck resolution (and we skip a
-            # per-step interpolation).
             depth = F.adaptive_avg_pool2d(depth, pred.shape[-2:])
             valid = depth > 0  # zero == no sensor return, excluded from loss/metrics
             probe_loss = F.mse_loss(pred[valid], depth[valid])

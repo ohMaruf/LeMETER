@@ -107,10 +107,6 @@ def save_image_tensor(image: torch.Tensor, destination_path: Path) -> None:
 
 
 def save_depth_as_cm(source_depth_path: Path, destination_path: Path) -> None:
-    """Write the depth map as uint16 centimeters, the single canonical unit (the
-    one the Meter model predicts in). Train maps arrive as uint8 (255 == 10 m)
-    and test maps as uint16 millimeters; both are rescaled to cm. Resolution is
-    preserved (depth is never resized)."""
     _ensure_dir(destination_path.parent)
     with Image.open(source_depth_path) as depth:
         array = np.asarray(depth)

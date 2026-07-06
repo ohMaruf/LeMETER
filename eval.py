@@ -240,7 +240,6 @@ def main():
         model = Meter.load(device, "nyu", arch)
         logger.info(f"METER {arch}")
         benchmark_accuracy(model, dataset, device)
-        # benchmark_accuracy(model, dataset, device)
         # benchmark_inference(model, dataset, device)
         # benchmark_inference(model, dataset, torch.device("cpu"))
 

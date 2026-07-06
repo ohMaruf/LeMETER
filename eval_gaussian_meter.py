@@ -12,7 +12,6 @@ from dataset import NormalizedNyuDataset
 
 RUNS_DIR = Path("runs")
 
-# run_dir_name -> (enable_derf, enable_gelu)
 ABLATIONS = {
     "nyu_xxs_20meter60ep_derf_relu": dict(enable_derf=True, enable_gelu=False),
     "nyu_xxs_20meter60ep_derf_gelu": dict(enable_derf=True, enable_gelu=True),
@@ -40,9 +39,6 @@ def main():
         metrics["epoch"] = ckpt["epoch"]
         metrics["best_val_rmse"] = ckpt["best_val_rmse"]
 
-        # torch.compile fuses the pointwise DERF/GELU chains into single kernels,
-        # which is the regime the DERF paper's no-reduction speed claim assumes.
-        # Eager mode issues one CUDA kernel launch per op and hides that benefit.
         if device.type == "cuda":
             fps_model = torch.compile(model, dynamic=False, mode="reduce-overhead")
             warmup_steps = 20
