@@ -384,3 +384,7 @@ preprocessed_datasets
 .vscode/
 .junie
 runs_local
+runs
+pca
+pca_meter_gaussianity
+metrics
