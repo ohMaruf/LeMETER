@@ -482,6 +482,20 @@ class LeMeterEncoder(nn.Module):
         model.eval()
         return model
 
+    @staticmethod
+    def load(device: torch.device, dataset: Literal["nyu", "kitti"] = "nyu", arch: MeterArchitecture = "xxs") -> "LeMeterEncoder":
+        meter = Meter(device, arch)
+        model = LeMeterEncoder(device, meter.encoder)
+
+        # TODO(nobuild): modify this path with the actual paths where the weights are stored
+        model_path = Path(__file__).parent / "lemeter-models" / f"build_model_best_{dataset}_{arch}"
+        state_dict = torch.load(model_path, map_location=device)
+        model.load_state_dict(state_dict)
+        model.to(device)
+        model.eval()
+        return model
+
+
 
 class LeMeter(nn.Module):
     def __init__(self, device: torch.device, arch_type: MeterArchitecture, encoder: MobileViT):
